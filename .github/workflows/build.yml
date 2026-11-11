@@ -31,6 +31,15 @@ jobs:
         run: |
           flutter create --org io.github.fionadream --project-name dsh_harness --platforms=android .scaffold
           cp -r .scaffold/android ./android
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          text = p.read_text(encoding='utf-8')
+          if 'android.permission.INTERNET' not in text:
+              text = text.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
+              p.write_text(text, encoding='utf-8')
+          print('INTERNET permission:', 'android.permission.INTERNET' in p.read_text(encoding='utf-8'))
+          PY
 
       - name: Pub get
         run: flutter pub get
