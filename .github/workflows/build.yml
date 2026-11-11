@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-24.04
@@ -39,3 +42,10 @@ jobs:
         with:
           name: dsh-harness-apk
           path: build/app/outputs/flutter-apk/*.apk
+
+      - name: Publish to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: DSH Harness v0.1.${{ github.run_number }}
+          files: build/app/outputs/flutter-apk/*.apk
