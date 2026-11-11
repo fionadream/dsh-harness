@@ -34,15 +34,19 @@ jobs:
           python3 - <<'PY'
           import pathlib
           p = pathlib.Path('android/app/src/main/AndroidManifest.xml')
-          text = p.read_text(encoding='utf-8')
-          if 'android.permission.INTERNET' not in text:
-              text = text.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
-              p.write_text(text, encoding='utf-8')
-          print('INTERNET permission:', 'android.permission.INTERNET' in p.read_text(encoding='utf-8'))
+          t = p.read_text(encoding='utf-8')
+          if 'android.permission.INTERNET' not in t:
+              t = t.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
+          t = t.replace('android:label="dsh_harness"', 'android:label="DSH Harness"')
+          p.write_text(t, encoding='utf-8')
+          print('manifest ok')
           PY
 
       - name: Pub get
         run: flutter pub get
+
+      - name: Launcher icons
+        run: dart run flutter_launcher_icons
 
       - name: Build APK
         run: flutter build apk --release --target-platform android-arm64
@@ -55,6 +59,6 @@ jobs:
       - name: Publish to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.${{ github.run_number }}
-          name: DSH Harness v0.1.${{ github.run_number }}
+          tag_name: v0.2.${{ github.run_number }}
+          name: DSH Harness v0.2.${{ github.run_number }}
           files: build/app/outputs/flutter-apk/*.apk
