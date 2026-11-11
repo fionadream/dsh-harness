@@ -529,8 +529,8 @@ class _ChatPageState extends State<ChatPage> {
       setState(() {
         _events
           ..clear()
-          ..addAll(page.records);
-        _lastSeq = page.records.isEmpty ? 0 : page.records.last.seq;
+          ..addAll(page.events);
+        _lastSeq = page.events.isEmpty ? 0 : page.events.last.seq;
       });
       _scrollToEnd();
       _sub = widget.client.watch(widget.session.sessionId).listen((event) {
