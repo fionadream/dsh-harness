@@ -1,0 +1,41 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Clone protocol packages
+        run: git clone --depth 1 https://github.com/fionadream/dsh-Go.git vendor/dsh-go
+
+      - name: Scaffold Android project
+        run: |
+          flutter create --org io.github.fionadream --project-name dsh_harness --platforms=android .scaffold
+          cp -r .scaffold/android ./android
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --debug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-harness-apk
+          path: build/app/outputs/flutter-apk/*.apk
