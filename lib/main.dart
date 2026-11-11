@@ -5,26 +5,40 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
+import 'markdown.dart';
+import 'settings.dart';
 
 void main() => runApp(const DshMiniApp());
 
-const _brand = Color(0xFF4D6BFE);
+const kBrand = Color(0xFF4D6BFE);
+
+/// 全局字号缩放（设置页可调）。
+final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
 
 class DshMiniApp extends StatelessWidget {
   const DshMiniApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'DSH Harness',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.light,
-        colorSchemeSeed: _brand,
-        scaffoldBackgroundColor: const Color(0xFFF7F8FA),
+    return ValueListenableBuilder<double>(
+      valueListenable: kFontScale,
+      builder: (context, scale, _) => MaterialApp(
+        title: 'DSH Harness',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          useMaterial3: true,
+          brightness: Brightness.light,
+          colorSchemeSeed: kBrand,
+          scaffoldBackgroundColor: const Color(0xFFF7F8FA),
+          textScaler: TextScaler.linear(scale),
+        ),
+        builder: (context, child) => MediaQuery.withClampedTextScaling(
+          minScaleFactor: scale,
+          maxScaleFactor: scale,
+          child: child ?? const SizedBox.shrink(),
+        ),
+        home: const GatePage(),
       ),
-      home: const GatePage(),
     );
   }
 }
@@ -128,7 +142,7 @@ class _LoginPageState extends State<LoginPage> {
             children: [
               const CircleAvatar(
                 radius: 34,
-                backgroundColor: _brand,
+                backgroundColor: Colors.black,
                 child: Icon(Icons.terminal_rounded, color: Colors.white, size: 34),
               ),
               const SizedBox(height: 22),
@@ -231,7 +245,7 @@ class _HostsPageState extends State<HostsPage> {
                 color: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 child: ListTile(
-                  leading: Icon(Icons.computer_rounded, color: host.online ? _brand : Colors.grey),
+                  leading: Icon(Icons.computer_rounded, color: host.online ? kBrand : Colors.grey),
                   title: Text(host.name),
                   subtitle: Text(host.online ? '在线' : '离线'),
                   trailing: busy
@@ -283,14 +297,17 @@ class _HomePageState extends State<HomePage> {
         baseline = null;
       }
       if (!mounted) return;
+      final archived = (baseline?.archivedSessionIds ?? const <String>[]).toSet();
       setState(() {
         _sessions = sessions
             .where((s) => s.parentSessionId == null)
-            .where((s) => !(baseline?.archivedSessionIds.contains(s.sessionId) ?? false))
+            .where((s) => s.blank != true)
+            .where((s) => !archived.contains(s.sessionId))
             .toList();
         _workspaces = baseline?.workspaces ?? const [];
-        _archived = (baseline?.archivedSessionIds ?? const <String>[]).toSet();
+        _archived = archived;
         _loading = false;
+        _error = null;
       });
     } catch (error) {
       if (!mounted) return;
@@ -306,6 +323,78 @@ class _HomePageState extends State<HomePage> {
       if (s.sessionId == id) return s;
     }
     return null;
+  }
+
+  Future<void> _rename(SessionSummary session) async {
+    final controller = TextEditingController(text: session.projections.title ?? '');
+    final title = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重命名会话'),
+        content: TextField(controller: controller, autofocus: true),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('保存')),
+        ],
+      ),
+    );
+    if (title == null || title.isEmpty) return;
+    try {
+      await widget.client.renameSession(session.sessionId, title);
+      await _load();
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('重命名失败：$error')));
+    }
+  }
+
+  Future<void> _archive(SessionSummary session) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('归档会话？'),
+        content: const Text('归档后不在列表中显示，可在电脑端恢复。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('归档')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await widget.client.archiveSession(session.sessionId);
+      await _load();
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('归档失败：$error')));
+    }
+  }
+
+  void _actions(SessionSummary session) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('重命名'),
+              onTap: () {
+                Navigator.pop(context);
+                _rename(session);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.archive_outlined),
+              title: const Text('归档'),
+              onTap: () {
+                Navigator.pop(context);
+                _archive(session);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _open(SessionSummary session) {
@@ -348,6 +437,7 @@ class _HomePageState extends State<HomePage> {
       ),
       title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
       onTap: () => _open(s),
+      onLongPress: () => _actions(s),
     );
   }
 
@@ -369,8 +459,7 @@ class _HomePageState extends State<HomePage> {
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
             child: Row(
               children: [
-                Icon(open ? Icons.folder_open_rounded : Icons.folder_outlined,
-                    size: 17, color: Colors.black54),
+                Icon(open ? Icons.folder_open_rounded : Icons.folder_outlined, size: 17, color: Colors.black54),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(ws.title.isEmpty ? '未命名工作区' : ws.title,
@@ -422,7 +511,7 @@ class _HomePageState extends State<HomePage> {
                 padding: EdgeInsets.fromLTRB(18, 18, 18, 2),
                 child: Row(
                   children: [
-                    Icon(Icons.terminal_rounded, size: 22, color: _brand),
+                    Icon(Icons.terminal_rounded, size: 22, color: Colors.black),
                     SizedBox(width: 8),
                     Text('DSH Harness', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                   ],
@@ -454,16 +543,11 @@ class _HomePageState extends State<HomePage> {
               const Divider(height: 1),
               ListTile(
                 dense: true,
-                leading: const Icon(Icons.logout_rounded, size: 18),
-                title: const Text('退出登录', style: TextStyle(fontSize: 14)),
-                onTap: () async {
-                  await account.logout();
-                  if (!context.mounted) return;
-                  Navigator.of(context).pushAndRemoveUntil(
-                    MaterialPageRoute<void>(builder: (_) => const GatePage()),
-                    (_) => false,
-                  );
-                },
+                leading: const Icon(Icons.settings_outlined, size: 18),
+                title: const Text('设置', style: TextStyle(fontSize: 14)),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
+                ),
               ),
             ],
           ),
@@ -510,11 +594,14 @@ class _ChatPageState extends State<ChatPage> {
   bool _sending = false;
   bool _running = false;
   String? _error;
+  String _modelLabel = '模型';
 
   @override
   void initState() {
     super.initState();
     _running = widget.session.running;
+    final next = widget.session.projections.nextModel;
+    if (next != null) _modelLabel = next.model;
     _load();
   }
 
@@ -578,6 +665,49 @@ class _ChatPageState extends State<ChatPage> {
     } catch (_) {}
   }
 
+  Future<void> _pickModel() async {
+    try {
+      final catalog = await widget.client.listModels();
+      if (!mounted) return;
+      final chosen = await showModalBottomSheet<({String provider, String model, String name})>(
+        context: context,
+        isScrollControlled: true,
+        builder: (context) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              for (final group in catalog.groups) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                  child: Text(group.name, style: const TextStyle(fontSize: 12, color: Colors.black45)),
+                ),
+                for (final model in group.models)
+                  ListTile(
+                    dense: true,
+                    title: Text(model.name, style: const TextStyle(fontSize: 14)),
+                    trailing: model.id == _modelLabel ? const Icon(Icons.check, size: 18) : null,
+                    onTap: () => Navigator.pop(
+                      context,
+                      (provider: group.providerId, model: model.id, name: model.name),
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      );
+      if (chosen == null) return;
+      await widget.client.setModel(
+        widget.session.sessionId,
+        provider: chosen.provider,
+        model: chosen.model,
+      );
+      if (mounted) setState(() => _modelLabel = chosen.name);
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('切换失败：$error')));
+    }
+  }
+
   @override
   void dispose() {
     _sub?.cancel();
@@ -586,23 +716,11 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
-  String _textOf(Object? content) {
-    if (content is String) return content;
-    if (content is List) {
-      final buffer = StringBuffer();
-      for (final part in content) {
-        if (part is Map && part['text'] is String) buffer.write(part['text']);
-      }
-      return buffer.toString();
-    }
-    return '';
-  }
-
   Widget _bubble(SessionLogEvent event) {
     final data = event.data;
     final message = data['message'];
     final content = message is Map ? message['content'] : data['content'];
-    final text = _textOf(content);
+    final text = plainTextOf(content);
     switch (event.type) {
       case 'user/message':
         if (text.trim().isEmpty) return const SizedBox.shrink();
@@ -611,7 +729,7 @@ class _ChatPageState extends State<ChatPage> {
           child: Container(
             margin: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(color: _brand, borderRadius: BorderRadius.circular(16)),
+            decoration: BoxDecoration(color: kBrand, borderRadius: BorderRadius.circular(16)),
             child: Text(text, style: const TextStyle(color: Colors.white, fontSize: 15)),
           ),
         );
@@ -623,115 +741,140 @@ class _ChatPageState extends State<ChatPage> {
             margin: const EdgeInsets.only(right: 40, top: 4, bottom: 4),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-            child: Text(text, style: const TextStyle(fontSize: 15, height: 1.45)),
+            child: SimpleMarkdown(text),
           ),
         );
       case 'tool/call':
         final name = data['name'] ?? 'tool';
         final args = data['arguments'] ?? '';
-        return Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          child: ExpansionTile(
-            tilePadding: const EdgeInsets.symmetric(horizontal: 8),
-            childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-            title: Text('🔧 $name', style: const TextStyle(fontSize: 13, color: Colors.black54)),
-            children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF0F2F5),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text('$args', style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
-              ),
-            ],
-          ),
-        );
+        return _fold('🔧 $name', '$args');
+      case 'tool/result':
+        final result = plainTextOf(message is Map ? message['content'] : data['content']);
+        return _fold('↩︎ 结果', result);
       default:
         return const SizedBox.shrink();
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        centerTitle: true,
-        actions: [
-          if (_running)
-            TextButton.icon(
-              onPressed: _stop,
-              icon: const Icon(Icons.stop_circle_outlined, size: 18),
-              label: const Text('停止', style: TextStyle(fontSize: 13)),
-            ),
+  Widget _fold(String title, String body) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+        childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+        title: Text(title, style: const TextStyle(fontSize: 13, color: Colors.black54)),
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: const Color(0xFFF0F2F5), borderRadius: BorderRadius.circular(10)),
+            child: Text(body.length > 4000 ? body.substring(0, 4000) : body,
+                style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+          ),
         ],
       ),
-      body: Column(
-        children: [
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Text('错误：$_error', style: const TextStyle(color: Colors.red, fontSize: 12)),
-            ),
-          Expanded(
-            child: ListView(
-              controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-              children: _events.map(_bubble).toList(),
-            ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(22),
-                        border: Border.all(color: const Color(0xFFE6E9EF)),
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      child: TextField(
-                        controller: _input,
-                        minLines: 1,
-                        maxLines: 5,
-                        textInputAction: TextInputAction.newline,
-                        decoration: const InputDecoration(
-                          hintText: '发消息…',
-                          border: InputBorder.none,
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(vertical: 14),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 46,
-                    height: 46,
-                    child: FilledButton(
-                      onPressed: _sending ? null : _send,
-                      style: FilledButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        shape: const CircleBorder(),
-                        backgroundColor: _brand,
-                      ),
-                      child: _sending
-                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                          : const Icon(Icons.arrow_upward, size: 20),
-                    ),
-                  ),
-                ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onHorizontalDragEnd: (details) {
+        final v = details.primaryVelocity ?? 0;
+        if (v.abs() > 300) Navigator.of(context).maybePop();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          centerTitle: true,
+          actions: [
+            if (_running)
+              TextButton.icon(
+                onPressed: _stop,
+                icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                label: const Text('停止', style: TextStyle(fontSize: 13)),
+              ),
+          ],
+        ),
+        body: Column(
+          children: [
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(8),
+                child: Text('错误：$_error', style: const TextStyle(color: Colors.red, fontSize: 12)),
+              ),
+            Expanded(
+              child: ListView(
+                controller: _scroll,
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                children: _events.map(_bubble).toList(),
               ),
             ),
-          ),
-        ],
+            SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        ActionChip(
+                          avatar: const Icon(Icons.tune, size: 14),
+                          label: Text(_modelLabel, style: const TextStyle(fontSize: 12)),
+                          onPressed: _pickModel,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Expanded(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(22),
+                              border: Border.all(color: const Color(0xFFE6E9EF)),
+                            ),
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            child: TextField(
+                              controller: _input,
+                              minLines: 1,
+                              maxLines: 5,
+                              textInputAction: TextInputAction.newline,
+                              decoration: const InputDecoration(
+                                hintText: '发消息…',
+                                border: InputBorder.none,
+                                isDense: true,
+                                contentPadding: EdgeInsets.symmetric(vertical: 14),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: 46,
+                          height: 46,
+                          child: FilledButton(
+                            onPressed: _sending ? null : _send,
+                            style: FilledButton.styleFrom(
+                              padding: EdgeInsets.zero,
+                              shape: const CircleBorder(),
+                              backgroundColor: kBrand,
+                            ),
+                            child: _sending
+                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : const Icon(Icons.arrow_upward, size: 20),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
