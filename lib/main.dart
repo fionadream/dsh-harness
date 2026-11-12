@@ -10,6 +10,9 @@ import 'markdown.dart';
 import 'settings.dart';
 import 'theme.dart';
 
+/// 应用版本（设置页显示，便于核对装的是不是最新包）。
+const String kAppVersion = '0.2.28';
+
 void main() => runApp(const DshMiniApp());
 
 /// 全局字号缩放（设置里可调）。
@@ -309,11 +312,14 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  static const _collapsedKey = 'drawer.collapsed';
+
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
   List<Workspace> _workspaces = const [];
-  final Set<String> _expanded = {};
+  Set<String> _collapsed = {};
   SessionSummary? _current;
+  bool _currentHasApproval = false;
   bool _loading = true;
   String? _error;
 
@@ -321,6 +327,21 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _loadSessions();
+    _loadDrawerState();
+  }
+
+  Future<void> _loadDrawerState() async {
+    try {
+      final raw = await SecureStore().read(_collapsedKey);
+      if (!mounted || raw == null || raw.isEmpty) return;
+      setState(() => _collapsed = raw.split(',').where((e) => e.isNotEmpty).toSet());
+    } catch (_) {}
+  }
+
+  Future<void> _saveDrawerState() async {
+    try {
+      await SecureStore().write(_collapsedKey, _collapsed.join(','));
+    } catch (_) {}
   }
 
   Future<void> _loadSessions() async {
@@ -454,7 +475,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _open(SessionSummary session) {
-    setState(() => _current = session);
+    setState(() {
+      _current = session;
+      _currentHasApproval = false;
+    });
     _scaffoldKey.currentState?.closeDrawer();
   }
 
@@ -475,6 +499,23 @@ class _HomePageState extends State<HomePage> {
     return _sessions.where((s) => !grouped.contains(s.sessionId)).toList();
   }
 
+  /// 会话前的状态指示：运行中转圈 / 待审批橙点 / 其它绿点。
+  Widget _statusIndicator(SessionSummary s, bool selected) {
+    if (s.running) {
+      return const SizedBox(
+        width: 12,
+        height: 12,
+        child: CircularProgressIndicator(strokeWidth: 1.6, color: T.textSecondary),
+      );
+    }
+    final color = (selected && _currentHasApproval) ? const Color(0xFFF5A623) : const Color(0xFF32C48D);
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+  }
+
   Widget _sessionTile(SessionSummary s) {
     final title = s.projections.title ?? '未命名';
     final selected = _current?.sessionId == s.sessionId;
@@ -486,28 +527,21 @@ class _HomePageState extends State<HomePage> {
         onLongPress: () => _actions(s),
         child: Container(
           height: 48,
-          padding: const EdgeInsets.only(left: 36, right: 12),
+          padding: const EdgeInsets.only(left: T.indentSession, right: 12),
           decoration: BoxDecoration(
             color: selected ? T.selected : Colors.transparent,
             borderRadius: BorderRadius.circular(12),
           ),
           child: Row(
             children: [
-              Icon(
-                s.running ? Icons.circle : Icons.chat_bubble_outline_rounded,
-                size: s.running ? 9 : 17,
-                color: s.running ? const Color(0xFF32C48D) : T.textSecondary,
-              ),
+              SizedBox(width: 12, child: Center(child: _statusIndicator(s, selected))),
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
                   title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: T.body,
-                    color: selected ? T.brand : T.text,
-                  ),
+                  style: TextStyle(fontSize: T.body, color: selected ? T.brand : T.text),
                 ),
               ),
             ],
@@ -518,19 +552,22 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _workspaceRow(Workspace ws) {
-    final open = _expanded.contains(ws.workspaceId);
+    final open = !_collapsed.contains(ws.workspaceId);
     final items = _groupSessions(ws);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         InkWell(
-          onTap: () => setState(() {
-            if (open) {
-              _expanded.remove(ws.workspaceId);
-            } else {
-              _expanded.add(ws.workspaceId);
-            }
-          }),
+          onTap: () {
+            setState(() {
+              if (open) {
+                _collapsed.add(ws.workspaceId);
+              } else {
+                _collapsed.remove(ws.workspaceId);
+              }
+            });
+            _saveDrawerState();
+          },
           child: SizedBox(
             height: 48,
             child: Padding(
@@ -584,8 +621,7 @@ class _HomePageState extends State<HomePage> {
             ),
             const Padding(
               padding: EdgeInsets.fromLTRB(20, 12, 20, 4),
-              child: Text('工作区',
-                  style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
+              child: Text('工作区', style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
             ),
             Expanded(
               child: _loading
@@ -651,11 +687,11 @@ class _HomePageState extends State<HomePage> {
                 backgroundColor: T.bg,
                 shape: const RoundedRectangleBorder(
                     borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-                builder: (context) => SafeArea(
+                builder: (context) => const SafeArea(
                   child: Padding(
-                    padding: const EdgeInsets.all(20),
+                    padding: EdgeInsets.all(20),
                     child: Text('新建会话需要在电脑端创建',
-                        style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
+                        style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
                   ),
                 ),
               ),
@@ -670,6 +706,7 @@ class _HomePageState extends State<HomePage> {
                 client: widget.client,
                 session: _current!,
                 onTurnEnd: _refreshTitle,
+                onApprovalPending: (value) => setState(() => _currentHasApproval = value),
               ),
       ),
     );
@@ -734,11 +771,13 @@ class ChatView extends StatefulWidget {
     required this.client,
     required this.session,
     this.onTurnEnd,
+    this.onApprovalPending,
   });
 
   final DshClient client;
   final SessionSummary session;
   final Future<void> Function()? onTurnEnd;
+  final void Function(bool)? onApprovalPending;
 
   @override
   State<ChatView> createState() => _ChatViewState();
@@ -749,24 +788,35 @@ class _ChatViewState extends State<ChatView> {
   final List<String> _orphanUsers = [];
   final List<String> _orphanAnswers = [];
   final List<ApprovalRequest> _approvals = [];
+  final List<UserQuestionRequest> _questions = [];
+  final Map<String, Set<String>> _picked = {};
+  final List<String> _audit = [];
   final _input = TextEditingController();
   final _scroll = ScrollController();
   StreamSubscription<DshEvent>? _sub;
   int _lastSeq = 0;
   bool _loading = true;
   bool _sending = false;
+  bool _autoAllow = false;
   String? _pending;
   String? _error;
   String _modelLabel = '模型';
 
   static const Set<String> _nonHumanKinds = {
-    'context',
-    'system',
-    'tool',
-    'runtime-context',
-    'runtimeContext',
-    'injected',
+    'context', 'system', 'tool', 'runtime-context', 'runtimeContext', 'injected',
   };
+
+  /// 运行时上下文的文本前缀（兜底过滤）。
+  static const List<String> _contextPrefixes = [
+    'Current runtime context',
+    'Time sampled while preparing',
+    'Current working directory:',
+    'Session artifacts directory',
+    'Current DSH file policy',
+    'Approval prompts are enabled',
+    'Current DeepSeek Harness',
+    'The available skill catalog changed',
+  ];
 
   @override
   void initState() {
@@ -793,6 +843,7 @@ class _ChatViewState extends State<ChatView> {
           _ingest(event);
         }
         _lastSeq = page.events.isEmpty ? 0 : page.events.last.seq;
+        _replayPendingApprovals(page.events);
       });
       _scrollToEnd(force: true);
       _sub = widget.client.watch(widget.session.sessionId).listen((event) {
@@ -822,12 +873,25 @@ class _ChatViewState extends State<ChatView> {
           return;
         }
         if (event is ApprovalRequestedEvent) {
-          setState(() => _approvals.add(event.request));
+          _onApproval(event.request);
+          return;
+        }
+        if (event is UserQuestionRequestedEvent) {
+          setState(() {
+            if (!_questions.any((q) => q.eventId == event.request.eventId)) {
+              _questions.add(event.request);
+            }
+          });
+          widget.onApprovalPending?.call(true);
           _scrollToEnd(force: true);
           return;
         }
         if (event is HostRequestCancelledEvent) {
-          setState(() => _approvals.removeWhere((a) => a.eventId == event.eventId));
+          setState(() {
+            _approvals.removeWhere((a) => a.eventId == event.eventId);
+            _questions.removeWhere((q) => q.eventId == event.eventId);
+          });
+          widget.onApprovalPending?.call(_approvals.isNotEmpty || _questions.isNotEmpty);
           return;
         }
         if (event is ConnectionStateEvent) {
@@ -847,6 +911,52 @@ class _ChatViewState extends State<ChatView> {
     }
   }
 
+  /// 从历史里恢复「问了但没决定」的审批（订阅前就挂起的那种）。
+  void _replayPendingApprovals(List<SessionLogEvent> events) {
+    final asked = <String, Map<String, Object?>>{};
+    for (final event in events) {
+      final id = event.data['id'];
+      if (id is! String) continue;
+      if (event.type == 'approval/asked') {
+        asked[id] = event.data;
+      } else if (event.type == 'approval/decided') {
+        asked.remove(id);
+      }
+    }
+    for (final entry in asked.entries) {
+      _approvals.add(ApprovalRequest(
+        eventId: entry.key,
+        sessionId: widget.session.sessionId,
+        toolName: (entry.value['toolName'] as String?) ?? 'tool',
+        callId: entry.value['callId'] as String?,
+        reason: entry.value['reason'] as String?,
+      ));
+    }
+    if (asked.isNotEmpty) widget.onApprovalPending?.call(true);
+  }
+
+  bool _isDangerous(ApprovalRequest request) {
+    final haystack = [
+      request.reason ?? '',
+      ...request.displayReason.values,
+    ].join(' ').toLowerCase();
+    return haystack.contains('danger-full-access') || haystack.contains('danger_full_access');
+  }
+
+  void _onApproval(ApprovalRequest request) {
+    if (_approvals.any((a) => a.eventId == request.eventId)) return;
+    if (_autoAllow && !_isDangerous(request)) {
+      _answer(request, ApprovalDecision.allowOnce, silent: true);
+      return;
+    }
+    setState(() {
+      _approvals.add(request);
+      _audit.clear();
+    });
+    widget.onApprovalPending?.call(true);
+    _scrollToEnd(force: true);
+  }
+
   void _ingest(SessionLogEvent event) {
     final data = event.data;
     switch (event.type) {
@@ -862,6 +972,8 @@ class _ChatViewState extends State<ChatView> {
         if (kind != null && _nonHumanKinds.contains(kind)) return;
         final text = visibleTextOf(map['content']);
         if (text.trim().isEmpty) return;
+        final head = text.trimLeft();
+        if (_contextPrefixes.any(head.startsWith)) return;
         if (_pending != null && _pending!.trim() == text.trim()) _pending = null;
         if (_turns.isEmpty) {
           _orphanUsers.add(text);
@@ -934,15 +1046,64 @@ class _ChatViewState extends State<ChatView> {
     } catch (_) {}
   }
 
-  Future<void> _answer(ApprovalRequest request, ApprovalDecision decision) async {
-    setState(() => _approvals.removeWhere((a) => a.eventId == request.eventId));
+  Future<void> _answer(ApprovalRequest request, ApprovalDecision decision, {bool silent = false}) async {
+    setState(() {
+      _approvals.removeWhere((a) => a.eventId == request.eventId);
+      if (silent) {
+        _audit.add('已自动允许：${request.toolName}');
+      }
+    });
+    widget.onApprovalPending?.call(_approvals.isNotEmpty || _questions.isNotEmpty);
     try {
       await widget.client.respondApproval(request, decision);
     } catch (error) {
       if (!mounted) return;
       setState(() => _approvals.add(request));
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('操作失败：$error')));
+      if (!silent) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('操作失败：$error')));
+      }
     }
+  }
+
+  Future<void> _submitQuestion(UserQuestionRequest request) async {
+    final answers = <QuestionAnswer>[];
+    for (final q in request.questions) {
+      final selected = _picked[q.id];
+      if (selected == null || selected.isEmpty) return;
+      answers.add(QuestionAnswer(q.id, selected: selected.toList()));
+    }
+    setState(() {
+      _questions.removeWhere((q) => q.eventId == request.eventId);
+      _picked.clear();
+    });
+    widget.onApprovalPending?.call(_approvals.isNotEmpty || _questions.isNotEmpty);
+    try {
+      await widget.client.answerQuestion(request, answers);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _questions.add(request));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('提交失败：$error')));
+    }
+  }
+
+  Future<void> _toggleAutoAllow() async {
+    if (_autoAllow) {
+      setState(() => _autoAllow = false);
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('开启自动允许？'),
+        content: const Text('本次会话内，所有审批都会自动通过；只有提权到完全访问（danger-full-access）的请求仍会问你。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('开启')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _autoAllow = true);
   }
 
   Future<void> _pickModel() async {
@@ -1103,70 +1264,168 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
+  Widget _circleAction({
+    required IconData icon,
+    required Color background,
+    required Color foreground,
+    bool outlined = false,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: outlined ? Colors.transparent : background,
+          shape: BoxShape.circle,
+          border: outlined ? Border.all(color: background, width: 1.4) : null,
+        ),
+        child: Icon(icon, size: 20, color: foreground),
+      ),
+    );
+  }
+
   Widget _approvalPanel() {
-    final visible = _approvals.take(2).toList(growable: false);
-    final rest = _approvals.length - visible.length;
+    final request = _approvals.first;
+    final rest = _approvals.length - 1;
     return Container(
       width: double.infinity,
       color: T.warnBg,
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          for (final request in visible) ...[
-            Row(
-              children: [
-                const Icon(Icons.shield_outlined, size: 16, color: Color(0xFFB7791F)),
-                const SizedBox(width: 6),
-                const Text('需要你确认',
-                    style: TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF8A5A00))),
-                const Spacer(),
-                Text(request.toolName, style: const TextStyle(fontSize: 13, color: T.textSecondary)),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              request.displayReason['zh'] ?? request.describe('zh'),
-              style: const TextStyle(fontSize: 15, height: 1.6, color: T.text),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () => _answer(request, ApprovalDecision.reject),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: T.danger,
-                      side: const BorderSide(color: T.divider),
-                      minimumSize: const Size(0, 44),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-                    ),
-                    child: const Text('拒绝'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: () => _answer(request, ApprovalDecision.allowOnce),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: T.brand,
-                      minimumSize: const Size(0, 44),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-                    ),
-                    child: const Text('允许'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
+          Row(
+            children: [
+              const Icon(Icons.shield_outlined, size: 16, color: Color(0xFFB7791F)),
+              const SizedBox(width: 6),
+              const Text('需要你确认',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF8A5A00))),
+              const Spacer(),
+              Text(request.toolName, style: const TextStyle(fontSize: 13, color: T.textSecondary)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            request.displayReason['zh'] ?? request.describe('zh'),
+            style: const TextStyle(fontSize: 15, height: 1.6, color: T.text),
+            maxLines: 4,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              _circleAction(
+                icon: Icons.close_rounded,
+                background: T.danger,
+                foreground: T.danger,
+                outlined: true,
+                onTap: () => _answer(request, ApprovalDecision.reject),
+              ),
+              const SizedBox(width: 14),
+              _circleAction(
+                icon: Icons.check_rounded,
+                background: T.brand,
+                foreground: Colors.white,
+                onTap: () => _answer(request, ApprovalDecision.allowOnce),
+              ),
+              const SizedBox(width: 14),
+              _circleAction(
+                icon: Icons.bolt_rounded,
+                background: const Color(0xFFF5A623),
+                foreground: Colors.white,
+                onTap: () async {
+                  await _toggleAutoAllow();
+                  if (!mounted || !_autoAllow) return;
+                  if (!_isDangerous(request)) {
+                    await _answer(request, ApprovalDecision.allowOnce, silent: true);
+                  }
+                },
+              ),
+              const Spacer(),
+              if (rest > 0)
+                Text('还有 $rest 条', style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _questionPanel() {
+    final request = _questions.first;
+    final question = request.questions.first;
+    final picked = _picked[question.id] ?? <String>{};
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFFF0F6FF),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('需要你回答',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: T.brand)),
+          const SizedBox(height: 8),
+          Text(question.question, style: const TextStyle(fontSize: 15, height: 1.6, color: T.text)),
+          if (question.detail != null && question.detail!.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(question.detail!,
+                style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
           ],
-          if (rest > 0)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text('还有 $rest 条待确认',
-                  style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final option in question.options)
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      final set = _picked.putIfAbsent(question.id, () => <String>{});
+                      if (question.multiSelect) {
+                        if (!set.remove(option.label)) set.add(option.label);
+                      } else {
+                        set
+                          ..clear()
+                          ..add(option.label);
+                      }
+                    });
+                    if (!question.multiSelect) _submitQuestion(request);
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: picked.contains(option.label) ? T.brand : T.bg,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: picked.contains(option.label) ? T.brand : T.divider),
+                    ),
+                    child: Text(
+                      option.label,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: picked.contains(option.label) ? Colors.white : T.text,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          if (question.multiSelect) ...[
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton(
+                onPressed: picked.isEmpty ? null : () => _submitQuestion(request),
+                style: FilledButton.styleFrom(
+                  backgroundColor: T.brand,
+                  minimumSize: const Size(0, 38),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(19)),
+                ),
+                child: const Text('提交'),
+              ),
             ),
+          ],
         ],
       ),
     );
@@ -1202,19 +1461,29 @@ class _ChatViewState extends State<ChatView> {
             ),
             Row(
               children: [
-                _chip(
-                  icon: Icons.tune_rounded,
-                  label: _modelLabel,
-                  onTap: _pickModel,
-                ),
+                _chip(icon: Icons.tune_rounded, label: _modelLabel, onTap: _pickModel),
                 const Spacer(),
                 if (_running)
-                  _chip(
-                    icon: Icons.stop_circle_outlined,
-                    label: '停止',
-                    onTap: _stop,
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _chip(icon: Icons.stop_circle_outlined, label: '停止', onTap: _stop),
                   ),
-                const SizedBox(width: 8),
+                if (_autoAllow)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: GestureDetector(
+                      onTap: _toggleAutoAllow,
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFF5A623),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.bolt_rounded, size: 20, color: Colors.white),
+                      ),
+                    ),
+                  ),
                 SizedBox(
                   width: 36,
                   height: 36,
@@ -1274,6 +1543,12 @@ class _ChatViewState extends State<ChatView> {
     if (_pending != null) {
       children.add(_userBubble(_pending!, pending: true));
     }
+    for (final line in _audit) {
+      children.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Text(line, style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+      ));
+    }
 
     return Column(
       children: [
@@ -1293,6 +1568,7 @@ class _ChatViewState extends State<ChatView> {
                   children: children,
                 ),
         ),
+        if (_questions.isNotEmpty) _questionPanel(),
         if (_approvals.isNotEmpty) _approvalPanel(),
         _composer(),
       ],

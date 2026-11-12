@@ -203,7 +203,7 @@ class SimpleMarkdown extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               SizedBox(
-                width: block.ordered ? 22 : 14,
+                width: block.ordered ? 18 : 16,
                 child: Text(block.ordered ? '${block.marker}' : '•',
                     style: TextStyle(fontSize: fontSize, height: T.bodyH, color: T.textSecondary)),
               ),
@@ -265,6 +265,10 @@ class SimpleMarkdown extends StatelessWidget {
 
   Widget _inline(String text, {Color? color, double? size}) {
     final base = size ?? fontSize;
+    // 兜底：`**` 不成对时直接去掉，避免界面上露出星号
+    if ('**'.allMatches(text).length.isOdd) {
+      text = text.replaceAll('**', '');
+    }
     final spans = <InlineSpan>[];
     final pattern = RegExp(r'(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)]+\))');
     var index = 0;

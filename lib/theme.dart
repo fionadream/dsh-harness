@@ -7,11 +7,11 @@ class T {
   // 颜色
   static const bg = Color(0xFFFFFFFF);
   static const bgGray = Color(0xFFF5F6F7);
-  static const text = Color(0xFF111111);
+  static const text = Color(0xFF1B1B1D);
   static const textSecondary = Color(0xFF8A8A8E);
   static const textTertiary = Color(0xFFB0B0B4);
   static const brand = Color(0xFF4D6BFE);
-  static const bubble = Color(0xFFEEF3FF);
+  static const bubble = Color(0xFFEBF3FE);
   static const divider = Color(0xFFEFEFEF);
   static const codeBg = Color(0xFFF7F7F8);
   static const selected = Color(0xFFEDF1FF);
@@ -27,11 +27,12 @@ class T {
   static const rChip = 18.0;
 
   // 间距
-  static const pad = 20.0;
+  static const pad = 26.0;
   static const gapS = 8.0;
   static const gapM = 12.0;
   static const gapL = 16.0;
   static const rowH = 56.0;
+  static const indentSession = 44.0;
 
   // 字体
   static const body = 17.0;

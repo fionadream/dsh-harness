@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'main.dart' show account, kFontScale, GatePage;
+import 'main.dart' show account, kAppVersion, kFontScale, GatePage;
 import 'theme.dart';
 
 class SettingsPage extends StatelessWidget {
@@ -55,6 +55,11 @@ class SettingsPage extends StatelessWidget {
           const Center(
             child: Text('DSH Harness',
                 style: TextStyle(fontSize: 12, color: T.textTertiary)),
+          ),
+          const SizedBox(height: 4),
+          Center(
+            child: Text('版本 $kAppVersion',
+                style: const TextStyle(fontSize: 12, color: T.textTertiary)),
           ),
           const SizedBox(height: 24),
         ],
