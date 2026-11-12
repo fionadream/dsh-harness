@@ -12,7 +12,7 @@ void main() => runApp(const DshMiniApp());
 
 const kBrand = Color(0xFF4D6BFE);
 
-/// 全局字号缩放（设置页可调）。
+/// 全局字号缩放（设置里可调）。
 final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
 
 class DshMiniApp extends StatelessWidget {
@@ -275,18 +275,18 @@ class _HomePageState extends State<HomePage> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
   List<Workspace> _workspaces = const [];
-  Set<String> _archived = const {};
   final Set<String> _expanded = {};
+  SessionSummary? _current;
   bool _loading = true;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _loadSessions();
   }
 
-  Future<void> _load() async {
+  Future<void> _loadSessions() async {
     try {
       final sessions = await widget.client.listSessions();
       WorkspaceBaseline? baseline;
@@ -304,7 +304,6 @@ class _HomePageState extends State<HomePage> {
             .where((s) => !archived.contains(s.sessionId))
             .toList();
         _workspaces = baseline?.workspaces ?? const [];
-        _archived = archived;
         _loading = false;
         _error = null;
       });
@@ -340,7 +339,7 @@ class _HomePageState extends State<HomePage> {
     if (title == null || title.isEmpty) return;
     try {
       await widget.client.renameSession(session.sessionId, title);
-      await _load();
+      await _loadSessions();
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('重命名失败：$error')));
     }
@@ -361,7 +360,8 @@ class _HomePageState extends State<HomePage> {
     if (ok != true) return;
     try {
       await widget.client.archiveSession(session.sessionId);
-      await _load();
+      if (_current?.sessionId == session.sessionId) setState(() => _current = null);
+      await _loadSessions();
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('归档失败：$error')));
     }
@@ -397,14 +397,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _open(SessionSummary session) {
-    Navigator.of(context).pop();
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => ChatPage(
-        client: widget.client,
-        session: session,
-        title: session.projections.title ?? '未命名',
-      ),
-    ));
+    setState(() => _current = session);
+    _scaffoldKey.currentState?.closeDrawer();
   }
 
   List<SessionSummary> _groupSessions(Workspace ws) {
@@ -426,8 +420,11 @@ class _HomePageState extends State<HomePage> {
 
   Widget _sessionTile(SessionSummary s) {
     final title = s.projections.title ?? '未命名';
+    final selected = _current?.sessionId == s.sessionId;
     return ListTile(
       dense: true,
+      selected: selected,
+      selectedTileColor: const Color(0xFFEEF2FF),
       contentPadding: const EdgeInsets.only(left: 34, right: 12),
       leading: Icon(
         s.running ? Icons.circle : Icons.chat_bubble_outline_rounded,
@@ -478,96 +475,104 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _drawer() {
+    final ungrouped = _ungrouped;
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 18, 18, 2),
+              child: Row(
+                children: [
+                  Icon(Icons.terminal_rounded, size: 22, color: Colors.black),
+                  SizedBox(width: 8),
+                  Text('DSH Harness', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                ],
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(18, 10, 18, 6),
+              child: Text('工作区', style: TextStyle(fontSize: 12, color: Colors.black45)),
+            ),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _error != null
+                      ? Padding(padding: const EdgeInsets.all(18), child: Text('加载失败：$_error'))
+                      : ListView(
+                          padding: EdgeInsets.zero,
+                          children: [
+                            ..._workspaces.map(_workspaceRow),
+                            if (ungrouped.isNotEmpty) ...[
+                              const Padding(
+                                padding: EdgeInsets.fromLTRB(18, 12, 18, 4),
+                                child: Text('未分组', style: TextStyle(fontSize: 12, color: Colors.black45)),
+                              ),
+                              ...ungrouped.map(_sessionTile),
+                            ],
+                          ],
+                        ),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.settings_outlined, size: 18),
+              title: const Text('设置', style: TextStyle(fontSize: 14)),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final ungrouped = _ungrouped;
-    return Scaffold(
-      key: _scaffoldKey,
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.menu),
-          onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-        ),
-        title: const Text('新对话', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-        centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add_circle_outline),
-            tooltip: '刷新',
-            onPressed: () {
-              setState(() => _loading = true);
-              _load();
-            },
+    return GestureDetector(
+      onHorizontalDragEnd: (details) {
+        final v = details.primaryVelocity ?? 0;
+        if (v > 250) _scaffoldKey.currentState?.openDrawer();
+      },
+      child: Scaffold(
+        key: _scaffoldKey,
+        drawer: _drawer(),
+        appBar: AppBar(
+          leading: IconButton(
+            icon: const Icon(Icons.menu),
+            onPressed: () => _scaffoldKey.currentState?.openDrawer(),
           ),
+          title: Text(_current?.projections.title ?? '新对话',
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+          centerTitle: true,
+        ),
+        body: _current == null
+            ? const _EmptyChat()
+            : ChatView(
+                key: ValueKey(_current!.sessionId),
+                client: widget.client,
+                session: _current!,
+              ),
+      ),
+    );
+  }
+}
+
+class _EmptyChat extends StatelessWidget {
+  const _EmptyChat();
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.bubble_chart_rounded, size: 46, color: Color(0xFFC7CEE0)),
+          SizedBox(height: 12),
+          Text('左滑打开会话列表', style: TextStyle(color: Colors.black45)),
         ],
-      ),
-      drawer: Drawer(
-        child: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(18, 18, 18, 2),
-                child: Row(
-                  children: [
-                    Icon(Icons.terminal_rounded, size: 22, color: Colors.black),
-                    SizedBox(width: 8),
-                    Text('DSH Harness', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                  ],
-                ),
-              ),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(18, 10, 18, 6),
-                child: Text('工作区', style: TextStyle(fontSize: 12, color: Colors.black45)),
-              ),
-              Expanded(
-                child: _loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : _error != null
-                        ? Padding(padding: const EdgeInsets.all(18), child: Text('加载失败：$_error'))
-                        : ListView(
-                            padding: EdgeInsets.zero,
-                            children: [
-                              ..._workspaces.map(_workspaceRow),
-                              if (ungrouped.isNotEmpty) ...[
-                                const Padding(
-                                  padding: EdgeInsets.fromLTRB(18, 12, 18, 4),
-                                  child: Text('未分组', style: TextStyle(fontSize: 12, color: Colors.black45)),
-                                ),
-                                ...ungrouped.map(_sessionTile),
-                              ],
-                            ],
-                          ),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                dense: true,
-                leading: const Icon(Icons.settings_outlined, size: 18),
-                title: const Text('设置', style: TextStyle(fontSize: 14)),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-      body: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onHorizontalDragEnd: (details) {
-          final v = details.primaryVelocity ?? 0;
-          if (v > 250) _scaffoldKey.currentState?.openDrawer();
-        },
-        child: const Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.bubble_chart_rounded, size: 46, color: Color(0xFFC7CEE0)),
-              SizedBox(height: 12),
-              Text('点左上角或右滑选择会话', style: TextStyle(color: Colors.black45)),
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -575,16 +580,15 @@ class _HomePageState extends State<HomePage> {
 
 /* ------------------------------------------------------------------ 对话 */
 
-class ChatPage extends StatefulWidget {
-  const ChatPage({super.key, required this.client, required this.session, required this.title});
+class ChatView extends StatefulWidget {
+  const ChatView({super.key, required this.client, required this.session});
   final DshClient client;
   final SessionSummary session;
-  final String title;
   @override
-  State<ChatPage> createState() => _ChatPageState();
+  State<ChatView> createState() => _ChatViewState();
 }
 
-class _ChatPageState extends State<ChatPage> {
+class _ChatViewState extends State<ChatView> {
   final List<SessionLogEvent> _events = [];
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -696,11 +700,7 @@ class _ChatPageState extends State<ChatPage> {
         ),
       );
       if (chosen == null) return;
-      await widget.client.setModel(
-        widget.session.sessionId,
-        provider: chosen.provider,
-        model: chosen.model,
-      );
+      await widget.client.setModel(widget.session.sessionId, provider: chosen.provider, model: chosen.model);
       if (mounted) setState(() => _modelLabel = chosen.name);
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('切换失败：$error')));
@@ -719,36 +719,33 @@ class _ChatPageState extends State<ChatPage> {
     final data = event.data;
     final message = data['message'];
     final content = message is Map ? message['content'] : data['content'];
-    final text = plainTextOf(content);
     switch (event.type) {
       case 'user/message':
+        final text = visibleTextOf(content);
         if (text.trim().isEmpty) return const SizedBox.shrink();
         return Align(
           alignment: Alignment.centerRight,
           child: Container(
-            margin: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
+            margin: const EdgeInsets.only(left: 56, top: 6, bottom: 6),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(color: kBrand, borderRadius: BorderRadius.circular(16)),
-            child: Text(text, style: const TextStyle(color: Colors.white, fontSize: 15)),
+            decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(14)),
+            child: Text(text, style: const TextStyle(fontSize: 15, height: 1.5, color: Color(0xFF1A1A1A))),
           ),
         );
       case 'assistant/message':
+        final text = visibleTextOf(content);
         if (text.trim().isEmpty) return const SizedBox.shrink();
-        return Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            margin: const EdgeInsets.only(right: 40, top: 4, bottom: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-            child: SimpleMarkdown(text),
-          ),
+        return Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 6, right: 12),
+          child: SimpleMarkdown(text),
         );
       case 'tool/call':
         final name = data['name'] ?? 'tool';
         final args = data['arguments'] ?? '';
         return _fold('🔧 $name', '$args');
       case 'tool/result':
-        final result = plainTextOf(message is Map ? message['content'] : data['content']);
+        final result = visibleTextOf(message is Map ? message['content'] : data['content']);
+        if (result.trim().isEmpty) return const SizedBox.shrink();
         return _fold('↩︎ 结果', result);
       default:
         return const SizedBox.shrink();
@@ -757,11 +754,11 @@ class _ChatPageState extends State<ChatPage> {
 
   Widget _fold(String title, String body) {
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
+      margin: const EdgeInsets.symmetric(vertical: 2),
       child: ExpansionTile(
-        tilePadding: const EdgeInsets.symmetric(horizontal: 8),
-        childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-        title: Text(title, style: const TextStyle(fontSize: 13, color: Colors.black54)),
+        tilePadding: const EdgeInsets.symmetric(horizontal: 4),
+        childrenPadding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+        title: Text(title, style: const TextStyle(fontSize: 12.5, color: Colors.black45)),
         children: [
           Container(
             width: double.infinity,
@@ -777,104 +774,90 @@ class _ChatPageState extends State<ChatPage> {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onHorizontalDragEnd: (details) {
-        final v = details.primaryVelocity ?? 0;
-        if (v.abs() > 300) Navigator.of(context).maybePop();
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-          centerTitle: true,
-          actions: [
-            if (_running)
-              TextButton.icon(
-                onPressed: _stop,
-                icon: const Icon(Icons.stop_circle_outlined, size: 18),
-                label: const Text('停止', style: TextStyle(fontSize: 13)),
-              ),
-          ],
+    return Column(
+      children: [
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text('错误：$_error', style: const TextStyle(color: Colors.red, fontSize: 12)),
+          ),
+        Expanded(
+          child: ListView(
+            controller: _scroll,
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+            children: _events.map(_bubble).toList(),
+          ),
         ),
-        body: Column(
-          children: [
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.all(8),
-                child: Text('错误：$_error', style: const TextStyle(color: Colors.red, fontSize: 12)),
-              ),
-            Expanded(
-              child: ListView(
-                controller: _scroll,
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                children: _events.map(_bubble).toList(),
-              ),
-            ),
-            SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(10, 4, 10, 8),
-                child: Column(
+        SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+            child: Column(
+              children: [
+                Row(
                   children: [
-                    Row(
-                      children: [
-                        ActionChip(
-                          avatar: const Icon(Icons.tune, size: 14),
-                          label: Text(_modelLabel, style: const TextStyle(fontSize: 12)),
-                          onPressed: _pickModel,
-                        ),
-                      ],
+                    ActionChip(
+                      avatar: const Icon(Icons.tune, size: 14),
+                      label: Text(_modelLabel, style: const TextStyle(fontSize: 12)),
+                      onPressed: _pickModel,
                     ),
-                    const SizedBox(height: 6),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Expanded(
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(22),
-                              border: Border.all(color: const Color(0xFFE6E9EF)),
-                            ),
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            child: TextField(
-                              controller: _input,
-                              minLines: 1,
-                              maxLines: 5,
-                              textInputAction: TextInputAction.newline,
-                              decoration: const InputDecoration(
-                                hintText: '发消息…',
-                                border: InputBorder.none,
-                                isDense: true,
-                                contentPadding: EdgeInsets.symmetric(vertical: 14),
-                              ),
-                            ),
+                    const Spacer(),
+                    if (_running)
+                      ActionChip(
+                        avatar: const Icon(Icons.stop_circle_outlined, size: 14),
+                        label: const Text('停止', style: TextStyle(fontSize: 12)),
+                        onPressed: _stop,
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(22),
+                          border: Border.all(color: const Color(0xFFE6E9EF)),
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        child: TextField(
+                          controller: _input,
+                          minLines: 1,
+                          maxLines: 5,
+                          decoration: const InputDecoration(
+                            hintText: '发消息…',
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: EdgeInsets.symmetric(vertical: 14),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        SizedBox(
-                          width: 46,
-                          height: 46,
-                          child: FilledButton(
-                            onPressed: _sending ? null : _send,
-                            style: FilledButton.styleFrom(
-                              padding: EdgeInsets.zero,
-                              shape: const CircleBorder(),
-                              backgroundColor: kBrand,
-                            ),
-                            child: _sending
-                                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                                : const Icon(Icons.arrow_upward, size: 20),
-                          ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 46,
+                      height: 46,
+                      child: FilledButton(
+                        onPressed: _sending ? null : _send,
+                        style: FilledButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          shape: const CircleBorder(),
+                          backgroundColor: kBrand,
                         ),
-                      ],
+                        child: _sending
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.arrow_upward, size: 20),
+                      ),
                     ),
                   ],
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
-      ),
+      ],
     );
   }
 }
