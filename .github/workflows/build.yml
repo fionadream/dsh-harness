@@ -40,6 +40,19 @@ jobs:
           t = t.replace('android:label="dsh_harness"', 'android:label="DSH R"')
           p.write_text(t, encoding='utf-8')
           print('manifest ok')
+
+          # file_picker 的传递依赖要求 compileSdk >= 36
+          for name in ('app/build.gradle.kts', 'app/build.gradle'):
+              g = pathlib.Path('android') / name
+              if not g.exists():
+                  continue
+              s = g.read_text(encoding='utf-8')
+              s = s.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 36')
+              s = s.replace('compileSdkVersion flutter.compileSdkVersion', 'compileSdkVersion 36')
+              s = s.replace('compileSdk = 34', 'compileSdk = 36')
+              s = s.replace('compileSdkVersion 34', 'compileSdkVersion 36')
+              g.write_text(s, encoding='utf-8')
+              print('patched compileSdk in', name)
           PY
 
       - name: Pub get
