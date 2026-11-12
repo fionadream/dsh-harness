@@ -13,13 +13,38 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.31';
+const String kAppVersion = '0.2.34';
 
 void main() => runApp(const DshMiniApp());
 
 /// logo 资源缺失时的兜底图标。
 Widget _logoFallback(BuildContext context, Object error, StackTrace? stack) =>
     const Icon(Icons.terminal_rounded, size: 24, color: T.brand);
+
+/// 模型名缩写：只保留版本部分。
+/// `deepseek-v4.1-flash-1017` → `v4.1-flash`
+/// `deepseek-v4-pro` → `v4-pro`
+/// `DeepSeek-V4.1-Flash High` → `v4.1-flash high`
+String shortModelName(String raw) {
+  var name = raw.trim();
+  if (name.isEmpty) return '模型';
+
+  // 去掉 provider 前缀（如 official/）
+  final slash = name.lastIndexOf('/');
+  if (slash >= 0 && slash + 1 < name.length) name = name.substring(slash + 1);
+
+  // 去掉 deepseek 前缀
+  name = name.replaceFirst(RegExp(r'^(deepseek|DeepSeek)[\s\-_]*'), '');
+
+  // 去掉尾部构建号（3 位以上数字）
+  name = name.replaceFirst(RegExp(r'[\s\-_]*\d{3,}$'), '');
+
+  name = name.trim();
+  if (name.isEmpty) return '模型';
+  // 只有像版本号（数字开头）才补 v 前缀；中文名保持原样
+  if (RegExp(r'^\d').hasMatch(name)) name = 'v$name';
+  return name.toLowerCase();
+}
 
 /// 全局字号缩放（设置里可调）。
 final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
@@ -1662,12 +1687,24 @@ class _ChatViewState extends State<ChatView> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                _chip(icon: Icons.tune_rounded, label: _modelLabel, onTap: _pickModel),
+                _chip(icon: Icons.tune_rounded, label: shortModelName(_modelLabel), onTap: _pickModel),
                 const Spacer(),
                 if (_running)
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
-                    child: _chip(icon: Icons.stop_circle_outlined, label: '停止', onTap: _stop),
+                    child: SizedBox(
+                      width: 36,
+                      height: 36,
+                      child: FilledButton(
+                        onPressed: _stop,
+                        style: FilledButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          shape: const CircleBorder(),
+                          backgroundColor: const Color(0xFF6B6B70),
+                        ),
+                        child: const Icon(Icons.stop_rounded, size: 20, color: Colors.white),
+                      ),
+                    ),
                   ),
                 if (_autoAllow)
                   Padding(
@@ -1715,7 +1752,7 @@ class _ChatViewState extends State<ChatView> {
       onTap: onTap,
       borderRadius: BorderRadius.circular(T.rChip),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(color: T.chipBg, borderRadius: BorderRadius.circular(T.rChip)),
         child: Row(
           mainAxisSize: MainAxisSize.min,
