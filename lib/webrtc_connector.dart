@@ -62,7 +62,6 @@ Future<RemotePeerConnection> createDshPeerConnector(
     _kChannelLabel,
     rtc.RTCDataChannelInit()..ordered = true,
   );
-  channel.binaryType = 'arraybuffer';
   channel.onDataChannelState = (state) {
     switch (state) {
       case rtc.RTCDataChannelState.RTCDataChannelOpen:
@@ -101,7 +100,7 @@ class _DshPeerConnection implements RemotePeerConnection {
   }
 
   @override
-  Future<void> addIceCandidate(JsonMap candidate) async {
+  Future<void> addIceCandidate(Map<String, Object?> candidate) async {
     final value = candidate['candidate'];
     if (value is! String || value.isEmpty) return;
     await _peer.addCandidate(rtc.RTCIceCandidate(
@@ -117,8 +116,8 @@ class _DshPeerConnection implements RemotePeerConnection {
   }
 
   @override
-  Future<List<JsonMap>> stats() async {
-    final out = <JsonMap>[];
+  Future<List<Map<String, Object?>>> stats() async {
+    final out = <Map<String, Object?>>[];
     final report = await _peer.getStats();
     if (report is List) {
       for (final item in report) {
