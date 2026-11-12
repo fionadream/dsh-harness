@@ -21,7 +21,7 @@ final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  KeepAlive.init();
+  KeepAliveService.init();
   runApp(const DshMiniApp());
 }
 
@@ -87,10 +87,10 @@ class _DshMiniAppState extends State<DshMiniApp> with WidgetsBindingObserver {
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
         // 切到后台：启动前台服务保活，并开始 1 小时倒计时。
-        KeepAlive.start(device: _lastDevice);
+        KeepAliveService.start(device: _lastDevice);
       case AppLifecycleState.resumed:
         // 回到前台：撤销倒计时、停服务，并让会话重新同步。
-        KeepAlive.stop();
+        KeepAliveService.stop();
         kResumeTick.value += 1;
       default:
         break;
@@ -429,7 +429,7 @@ class _HomePageState extends State<HomePage> {
     _loadSaveDir();
     kLastDevice.value = widget.host.name;
     // 首次连上后申请通知权限与忽略电池优化。
-    WidgetsBinding.instance.addPostFrameCallback((_) => KeepAlive.ensurePermissions());
+    WidgetsBinding.instance.addPostFrameCallback((_) => KeepAliveService.ensurePermissions());
     kResumeTick.addListener(_onResume);
   }
 
@@ -1024,12 +1024,12 @@ class _ChatViewState extends State<ChatView> {
     if (next != null) _modelLabel = next.model;
     _load();
     kResumeTick.addListener(_onResumeSync);
-    KeepAlive.expired.addListener(_onKeepAliveExpired);
+    KeepAliveService.expired.addListener(_onKeepAliveExpired);
   }
 
   /// 后台超过 1 小时：主动断开，切回来时由 resume 重新连接。
   void _onKeepAliveExpired() {
-    if (!mounted || !KeepAlive.expired.value) return;
+    if (!mounted || !KeepAliveService.expired.value) return;
     _sub?.cancel();
     _retryTimer?.cancel();
     _retryTimer = null;
@@ -1490,7 +1490,7 @@ class _ChatViewState extends State<ChatView> {
   @override
   void dispose() {
     kResumeTick.removeListener(_onResumeSync);
-    KeepAlive.expired.removeListener(_onKeepAliveExpired);
+    KeepAliveService.expired.removeListener(_onKeepAliveExpired);
     _retryTimer?.cancel();
     _sub?.cancel();
     _input.dispose();

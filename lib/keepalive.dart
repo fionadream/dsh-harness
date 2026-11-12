@@ -27,8 +27,8 @@ class _KeepAliveHandler extends TaskHandler {
 }
 
 /// 保活控制：进入后台启动前台服务并开始倒计时，回到前台立即撤销。
-class KeepAlive {
-  KeepAlive._();
+class KeepAliveService {
+  KeepAliveService._();
 
   static Timer? _timer;
   static bool _initialized = false;
