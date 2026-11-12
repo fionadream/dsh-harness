@@ -8,14 +8,22 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:dsh_remote/dsh_remote.dart';
 import 'filebrowser.dart';
 import 'files.dart';
+import 'keepalive.dart';
 import 'markdown.dart';
 import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.34';
+const String kAppVersion = '0.2.36';
 
-void main() => runApp(const DshMiniApp());
+/// 从后台切回前台时递增，会话页据此触发一次重新同步。
+final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  KeepAlive.init();
+  runApp(const DshMiniApp());
+}
 
 /// logo 资源缺失时的兜底图标。
 Widget _logoFallback(BuildContext context, Object error, StackTrace? stack) =>
@@ -49,8 +57,47 @@ String shortModelName(String raw) {
 /// 全局字号缩放（设置里可调）。
 final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
 
-class DshMiniApp extends StatelessWidget {
+/// 当前连接的电脑名（保活通知里显示）。
+final ValueNotifier<String?> kLastDevice = ValueNotifier<String?>(null);
+
+class DshMiniApp extends StatefulWidget {
   const DshMiniApp({super.key});
+
+  @override
+  State<DshMiniApp> createState() => _DshMiniAppState();
+}
+
+class _DshMiniAppState extends State<DshMiniApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        // 切到后台：启动前台服务保活，并开始 1 小时倒计时。
+        KeepAlive.start(device: _lastDevice);
+      case AppLifecycleState.resumed:
+        // 回到前台：撤销倒计时、停服务，并让会话重新同步。
+        KeepAlive.stop();
+        kResumeTick.value += 1;
+      default:
+        break;
+    }
+  }
+
+  String? get _lastDevice => kLastDevice.value;
 
   @override
   Widget build(BuildContext context) {
@@ -380,6 +427,21 @@ class _HomePageState extends State<HomePage> {
     _loadDrawerState();
     _loadReadState();
     _loadSaveDir();
+    kLastDevice.value = widget.host.name;
+    // 首次连上后申请通知权限与忽略电池优化。
+    WidgetsBinding.instance.addPostFrameCallback((_) => KeepAlive.ensurePermissions());
+    kResumeTick.addListener(_onResume);
+  }
+
+  @override
+  void dispose() {
+    kResumeTick.removeListener(_onResume);
+    super.dispose();
+  }
+
+  void _onResume() {
+    if (!mounted) return;
+    _loadSessions();
   }
 
   Future<void> _loadSaveDir() async {
@@ -928,6 +990,10 @@ class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
   StreamSubscription<DshEvent>? _sub;
   int _lastSeq = 0;
+  Timer? _retryTimer;
+  int _retryAttempt = 0;
+  bool _resyncing = false;
+  bool _wasDisconnected = false;
   bool _loading = true;
   bool _sending = false;
   bool _autoAllow = false;
@@ -957,6 +1023,17 @@ class _ChatViewState extends State<ChatView> {
     final next = widget.session.projections.nextModel;
     if (next != null) _modelLabel = next.model;
     _load();
+    kResumeTick.addListener(_onResumeSync);
+    KeepAlive.expired.addListener(_onKeepAliveExpired);
+  }
+
+  /// 后台超过 1 小时：主动断开，切回来时由 resume 重新连接。
+  void _onKeepAliveExpired() {
+    if (!mounted || !KeepAlive.expired.value) return;
+    _sub?.cancel();
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    setState(() => _error = '后台超过 1 小时，连接已断开');
   }
 
   Future<void> _load() async {
@@ -979,7 +1056,88 @@ class _ChatViewState extends State<ChatView> {
         _replayPendingApprovals(page.events);
       });
       _scrollToEnd(force: true);
-      _sub = widget.client.watch(widget.session.sessionId).listen((event) {
+      _subscribe();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = '$error';
+      });
+    }
+  }
+
+  /// 退避重连：1s / 2s / 4s / 8s / 16s，最多 5 次，之后交给用户手动下拉。
+  void _scheduleReconnect() {
+    if (_retryTimer != null) return;
+    if (_retryAttempt >= 5) return;
+    final delay = Duration(seconds: 1 << _retryAttempt);
+    _retryAttempt += 1;
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      _resync(force: true);
+    });
+  }
+
+  /// 重新拉历史基线 + 重新订阅。
+  Future<void> _resync({bool force = false}) async {
+    if (_resyncing) return;
+    _resyncing = true;
+    try {
+      var asOf = _lastSeq;
+      try {
+        final sessions = await widget.client.listSessions();
+        for (final s in sessions) {
+          if (s.sessionId == widget.session.sessionId) {
+            asOf = s.projections.asOfSeq;
+            break;
+          }
+        }
+      } catch (_) {}
+      if (asOf <= 0) asOf = _lastSeq;
+      if (asOf <= 0) return;
+
+      final page = await widget.client.history(
+        widget.session.sessionId,
+        throughSeq: asOf,
+        maxMessages: 40,
+      );
+      if (!mounted) return;
+      setState(() {
+        _turns.clear();
+        _orphanUsers.clear();
+        _orphanAnswers.clear();
+        _approvals.clear();
+        _questions.clear();
+        for (final event in page.events) {
+          _ingest(event);
+        }
+        _lastSeq = page.events.isEmpty ? asOf : page.events.last.seq;
+        _error = null;
+        _replayPendingApprovals(page.events);
+      });
+      _retryAttempt = 0;
+      widget.onApprovalPending?.call(_approvals.isNotEmpty || _questions.isNotEmpty);
+      if (force) _scrollToEnd(force: true);
+
+      // 重新订阅（旧订阅可能已经静默失效）。
+      _sub?.cancel();
+      _subscribe();
+    } catch (_) {
+      _scheduleReconnect();
+    } finally {
+      _resyncing = false;
+    }
+  }
+
+  /// 建立（或重建）跟随订阅。断线重连后需要重新调用。
+  void _subscribe() {
+    _sub?.cancel();
+    _sub = widget.client
+        .watch(
+          widget.session.sessionId,
+          options: const WatchOptions(includeSyncEvents: true),
+        )
+        .listen((event) {
         if (event is SessionLogEvent) {
           if (event.seq <= _lastSeq) return;
           setState(() {
@@ -1030,18 +1188,32 @@ class _ChatViewState extends State<ChatView> {
         if (event is ConnectionStateEvent) {
           final ok = event.state == DshConnectionState.connected;
           setState(() => _error = ok ? null : '连接已断开，正在重连…');
+          if (ok && _wasDisconnected) {
+            _wasDisconnected = false;
+            _resync(force: true);
+          } else if (!ok) {
+            _wasDisconnected = true;
+          }
+          return;
+        }
+        if (event is SessionSyncEvent) {
+          // 跟随流在断线后重新建立：重新拉一次基线，避免界面缺段。
+          _resync();
           return;
         }
       }, onError: (Object error) {
-        if (mounted) setState(() => _error = '$error');
+        if (!mounted) return;
+        setState(() => _error = '连接异常，正在重连…');
+        _scheduleReconnect();
+      }, onDone: () {
+        if (!mounted) return;
+        setState(() => _error = '连接已断开，正在重连…');
+        _scheduleReconnect();
       });
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = '$error';
-      });
-    }
+  }
+
+  void _onResumeSync() {
+    _resync(force: true);
   }
 
   /// 从历史里恢复「问了但没决定」的审批（订阅前就挂起的那种）。
@@ -1317,6 +1489,9 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   void dispose() {
+    kResumeTick.removeListener(_onResumeSync);
+    KeepAlive.expired.removeListener(_onKeepAliveExpired);
+    _retryTimer?.cancel();
     _sub?.cancel();
     _input.dispose();
     _scroll.dispose();

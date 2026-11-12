@@ -35,9 +35,22 @@ jobs:
           import pathlib
           p = pathlib.Path('android/app/src/main/AndroidManifest.xml')
           t = p.read_text(encoding='utf-8')
-          if 'android.permission.INTERNET' not in t:
-              t = t.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
+          perms = [
+              'android.permission.INTERNET',
+              'android.permission.WAKE_LOCK',
+              'android.permission.POST_NOTIFICATIONS',
+              'android.permission.FOREGROUND_SERVICE',
+              'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+              'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+          ]
+          for perm in perms:
+              if perm not in t:
+                  t = t.replace('<application', '<uses-permission android:name="%s"/>\n    <application' % perm, 1)
           t = t.replace('android:label="dsh_harness"', 'android:label="DSH R"')
+          svc = ('<service android:name="com.pravera.flutter_foreground_task.service.ForegroundService" '
+                 'android:foregroundServiceType="dataSync" android:exported="false" />\n    </application>')
+          if 'ForegroundService' not in t:
+              t = t.replace('</application>', svc, 1)
           p.write_text(t, encoding='utf-8')
           print('manifest ok')
 
