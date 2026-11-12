@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
 import 'filebrowser.dart';
+import 'filecard.dart';
 import 'files.dart';
 import 'keepalive.dart';
 import 'markdown.dart';
@@ -14,7 +15,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.37';
+const String kAppVersion = '0.2.38';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -407,14 +408,12 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const _collapsedKey = 'drawer.collapsed';
   static const _readAtKey = 'sessions.readAt';
-  static const _saveDirKey = 'files.saveDir';
 
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
   List<Workspace> _workspaces = const [];
   Set<String> _collapsed = {};
   final Map<String, DateTime> _readAt = {};
-  String? _saveDir;
   SessionSummary? _current;
   bool _currentHasApproval = false;
   bool _loading = true;
@@ -426,7 +425,6 @@ class _HomePageState extends State<HomePage> {
     _loadSessions();
     _loadDrawerState();
     _loadReadState();
-    _loadSaveDir();
     kLastDevice.value = widget.host.name;
     // 首次连上后申请通知权限与忽略电池优化。
     WidgetsBinding.instance.addPostFrameCallback((_) => KeepAliveService.ensurePermissions());
@@ -442,14 +440,6 @@ class _HomePageState extends State<HomePage> {
   void _onResume() {
     if (!mounted) return;
     _loadSessions();
-  }
-
-  Future<void> _loadSaveDir() async {
-    try {
-      final raw = await SecureStore().read(_saveDirKey);
-      if (!mounted || raw == null) return;
-      setState(() => _saveDir = raw.isEmpty ? null : raw);
-    } catch (_) {}
   }
 
   Future<void> _loadDrawerState() async {
@@ -866,7 +856,6 @@ class _HomePageState extends State<HomePage> {
                     builder: (_) => FileBrowserPage(
                       client: widget.client,
                       sessionId: session.sessionId,
-                      saveDir: _saveDir,
                     ),
                   ),
                 );
@@ -930,6 +919,13 @@ class _EmptyChat extends StatelessWidget {
 
 /* ------------------------------------------------------------------ 对话 */
 
+/// 上传到工作区后的文件信息。
+class _Upload {
+  _Upload(this.name, this.path);
+  final String name;
+  final String path;
+}
+
 class _Turn {
   _Turn(this.turn, this.start);
   final int turn;
@@ -992,7 +988,7 @@ class _ChatViewState extends State<ChatView> {
   final List<UserQuestionRequest> _questions = [];
   final Map<String, Set<String>> _picked = {};
   final List<String> _audit = [];
-  final List<({String receiptId, String name})> _uploads = [];
+  final List<_Upload> _uploads = [];
   bool _uploading = false;
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -1087,7 +1083,6 @@ class _ChatViewState extends State<ChatView> {
     }
     _replaying = false;
     _pending = keepPending;
-    _replayPendingApprovals(_events);
     _oldestSeq = _events.isEmpty ? 0 : _events.first.seq;
   }
 
@@ -1274,28 +1269,10 @@ class _ChatViewState extends State<ChatView> {
   }
 
   /// 从历史里恢复「问了但没决定」的审批（订阅前就挂起的那种）。
-  void _replayPendingApprovals(List<SessionLogEvent> events) {
-    final asked = <String, Map<String, Object?>>{};
-    for (final event in events) {
-      final id = event.data['id'];
-      if (id is! String) continue;
-      if (event.type == 'approval/asked') {
-        asked[id] = event.data;
-      } else if (event.type == 'approval/decided') {
-        asked.remove(id);
-      }
-    }
-    for (final entry in asked.entries) {
-      _approvals.add(ApprovalRequest(
-        eventId: entry.key,
-        sessionId: widget.session.sessionId,
-        toolName: (entry.value['toolName'] as String?) ?? 'tool',
-        callId: entry.value['callId'] as String?,
-        reason: entry.value['reason'] as String?,
-      ));
-    }
-    if (asked.isNotEmpty) widget.onApprovalPending?.call(true);
-  }
+  /// 注意：不再从历史里重建审批卡片。
+  /// 历史里的 approval id 与 waterfall 的 eventId 不是同一个，
+  /// 重建出来的卡片点了会静默无效（$events/result 找不到对应请求）。
+  /// 只渲染实时 waterfall 事件下发的审批。
 
   void _onApproval(ApprovalRequest request) {
     if (_approvals.any((a) => a.eventId == request.eventId)) return;
@@ -1379,7 +1356,7 @@ class _ChatViewState extends State<ChatView> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if ((text.isEmpty && _uploads.isEmpty) || _sending) return;
-    final receipts = _uploads.map((e) => e.receiptId).toList(growable: false);
+    final uploads = List<_Upload>.from(_uploads);
     setState(() {
       _sending = true;
       _pending = text.isEmpty ? null : text;
@@ -1387,12 +1364,13 @@ class _ChatViewState extends State<ChatView> {
     _input.clear();
     _scrollToEnd(force: true);
     try {
-      await widget.client.prompt(
-        widget.session.sessionId,
-        text.isEmpty ? '（已发送文件）' : text,
-        fileReceiptIds: receipts,
-      );
-      if (receipts.isNotEmpty && mounted) setState(_uploads.clear);
+      final buffer = StringBuffer(text.isEmpty ? '' : text);
+      if (uploads.isNotEmpty) {
+        buffer.write('\n\n已上传文件：');
+        buffer.write(uploads.map((e) => e.path).join('\n'));
+      }
+      await widget.client.prompt(widget.session.sessionId, buffer.toString().trim());
+      if (uploads.isNotEmpty && mounted) setState(_uploads.clear);
     } catch (error) {
       if (mounted) {
         setState(() => _pending = null);
@@ -1415,9 +1393,9 @@ class _ChatViewState extends State<ChatView> {
         return;
       }
       setState(() => _uploading = true);
-      final upload = await uploadToSession(widget.client, widget.session.sessionId, picked);
+      final path = await uploadToSession(widget.client, widget.session.sessionId, picked);
       if (!mounted) return;
-      setState(() => _uploads.add(upload));
+      setState(() => _uploads.add(_Upload(picked.name, path)));
       _scrollToEnd(force: true);
     } catch (error) {
       if (!mounted) return;
@@ -1636,9 +1614,20 @@ class _ChatViewState extends State<ChatView> {
   Widget _answerBlock(String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
-      child: GestureDetector(
-        onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
-        child: SimpleMarkdown(text),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GestureDetector(
+            onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
+            child: SimpleMarkdown(text),
+          ),
+          FileStrip(
+            client: widget.client,
+            sessionId: widget.session.sessionId,
+            text: text,
+            cwd: widget.session.cwd,
+          ),
+        ],
       ),
     );
   }

@@ -1,62 +1,10 @@
 import 'package:flutter/material.dart';
 
-import 'files.dart';
-import 'main.dart' show account, kAppVersion, kFontScale, GatePage, secureStoreRead, secureStoreWrite;
+import 'main.dart' show account, kAppVersion, kFontScale, GatePage;
 import 'theme.dart';
 
-const String kSaveDirKey = 'files.saveDir';
-
-class SettingsPage extends StatefulWidget {
+class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
-
-  @override
-  State<SettingsPage> createState() => _SettingsPageState();
-}
-
-class _SettingsPageState extends State<SettingsPage> {
-  String? _saveDir;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSaveDir();
-  }
-
-  Future<void> _loadSaveDir() async {
-    final raw = await secureStoreRead(kSaveDirKey);
-    if (!mounted) return;
-    setState(() => _saveDir = (raw == null || raw.isEmpty) ? null : raw);
-  }
-
-  Future<void> _pickSaveDir() async {
-    final dir = await pickSaveDirectory();
-    if (dir == null || dir.isEmpty) return;
-    final writable = await directoryWritable(dir);
-    if (!mounted) return;
-    if (!writable) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('这个目录不可写，请换一个（或使用「每次询问」）')),
-      );
-      return;
-    }
-    await secureStoreWrite(kSaveDirKey, dir);
-    if (!mounted) return;
-    setState(() => _saveDir = dir);
-  }
-
-  Future<void> _resetSaveDir() async {
-    await secureStoreWrite(kSaveDirKey, '');
-    if (!mounted) return;
-    setState(() => _saveDir = null);
-  }
-
-  String get _saveDirLabel {
-    final dir = _saveDir;
-    if (dir == null || dir.isEmpty) return '每次询问';
-    final parts = dir.replaceAll('\\', '/').split('/').where((e) => e.isNotEmpty).toList();
-    if (parts.length <= 2) return dir;
-    return '…/${parts.sublist(parts.length - 2).join('/')}';
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -83,23 +31,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     MaterialPageRoute<void>(builder: (_) => const FontPage()),
                   ),
                 ),
-                const Divider(height: 0.8, color: T.divider, indent: 48),
-                TRow(
-                  icon: Icons.download_rounded,
-                  label: '文件保存目录',
-                  trailing: Text(_saveDirLabel,
-                      style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
-                  onTap: _pickSaveDir,
-                ),
-                if (_saveDir != null) ...[
-                  const Divider(height: 0.8, color: T.divider, indent: 48),
-                  TRow(
-                    icon: Icons.restart_alt_rounded,
-                    label: '重置为「每次询问」',
-                    showChevron: false,
-                    onTap: _resetSaveDir,
-                  ),
-                ],
               ],
             ),
           ),

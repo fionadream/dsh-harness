@@ -3,7 +3,8 @@ import 'package:flutter/services.dart';
 
 import 'theme.dart';
 
-/// 只取「可见文本」部分：过滤掉 reasoning（思考过程）。
+/// 只取「可见文本」部分：**白名单**——仅保留 type 为 text 的片段。
+/// 思考过程（reasoning / thinking / cot 等其它类型）一律丢弃。
 String visibleTextOf(Object? content) {
   if (content is String) return content;
   if (content is List) {
@@ -11,9 +12,11 @@ String visibleTextOf(Object? content) {
     for (final part in content) {
       if (part is! Map) continue;
       final type = part['type'];
+      // 只认纯文本片段；类型未知或不是 text 的一律跳过
+      if (type != null && type != 'text') continue;
+      if (part['reasoning'] == true) continue;
       final text = part['text'];
       if (text is! String) continue;
-      if (type == 'reasoning' || type == 'thinking') continue;
       buffer.write(text);
     }
     return buffer.toString();

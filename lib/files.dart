@@ -37,8 +37,9 @@ Future<PickedUpload?> pickFileForUpload() async {
   return PickedUpload(file.name, bytes);
 }
 
-/// 上传到会话工作区，返回 receiptId（可直接用于 prompt 的 fileReceiptIds）。
-Future<({String receiptId, String name})> uploadToSession(
+/// 上传到会话工作区，返回文件在工作区里的相对路径。
+/// 中继通道没有文件回执接口，只能走 `workspace.upload.v1`。
+Future<String> uploadToSession(
   DshClient client,
   String sessionId,
   PickedUpload picked,
@@ -46,8 +47,12 @@ Future<({String receiptId, String name})> uploadToSession(
   if (picked.size > kMaxUploadBytes) {
     throw Exception('文件超过 30 MiB，请先压缩或拆分');
   }
-  final receipt = await client.uploadFile(sessionId, picked.bytes, name: picked.name);
-  return (receiptId: receipt.receiptId, name: picked.name);
+  final uploaded = await client.uploadWorkspaceFile(
+    sessionId,
+    picked.bytes,
+    name: picked.name,
+  );
+  return uploaded.path;
 }
 
 /* ------------------------------------------------------------ 保存目录 */
