@@ -704,7 +704,8 @@ class _ChatViewState extends State<ChatView> {
           return;
         }
         if (event is ConnectionStateEvent) {
-          final ok = event.state == DshConnectionState.connected;\n          setState(() => _error = ok ? null : '连接已断开，正在重连…');
+          final ok = event.state == DshConnectionState.connected;
+          setState(() => _error = ok ? null : '连接已断开，正在重连…');
           return;
         }
       }, onError: (Object error) {
