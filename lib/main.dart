@@ -14,7 +14,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.36';
+const String kAppVersion = '0.2.37';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -980,6 +980,14 @@ class _ChatViewState extends State<ChatView> {
   final List<_Turn> _turns = [];
   final List<String> _orphanUsers = [];
   final List<String> _orphanAnswers = [];
+  final List<SessionLogEvent> _events = [];
+  int _oldestSeq = 0;
+  bool _hasMore = false;
+  bool _loadingOlder = false;
+  bool _replaying = false;
+
+  /// 每次拉取的历史窗口大小（约 10 轮）。
+  static const int _pageSize = 120;
   final List<ApprovalRequest> _approvals = [];
   final List<UserQuestionRequest> _questions = [];
   final Map<String, Set<String>> _picked = {};
@@ -1041,19 +1049,18 @@ class _ChatViewState extends State<ChatView> {
       final page = await widget.client.history(
         widget.session.sessionId,
         throughSeq: widget.session.projections.asOfSeq,
-        maxMessages: 40,
+        maxMessages: _pageSize,
+        turnWindow: const TurnWindow(120, 12),
       );
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _turns.clear();
-        _orphanUsers.clear();
-        _orphanAnswers.clear();
-        for (final event in page.events) {
-          _ingest(event);
-        }
+        _events
+          ..clear()
+          ..addAll(page.events);
+        _hasMore = page.hasMore;
         _lastSeq = page.events.isEmpty ? 0 : page.events.last.seq;
-        _replayPendingApprovals(page.events);
+        _rebuild();
       });
       _scrollToEnd(force: true);
       _subscribe();
@@ -1063,6 +1070,58 @@ class _ChatViewState extends State<ChatView> {
         _loading = false;
         _error = '$error';
       });
+    }
+  }
+
+  /// 用 `_events` 全量重建渲染结构（供首屏、重连、上拉加载复用）。
+  void _rebuild() {
+    _turns.clear();
+    _orphanUsers.clear();
+    _orphanAnswers.clear();
+    _approvals.clear();
+    _questions.clear();
+    final keepPending = _pending;
+    _replaying = true;
+    for (final event in _events) {
+      _ingest(event);
+    }
+    _replaying = false;
+    _pending = keepPending;
+    _replayPendingApprovals(_events);
+    _oldestSeq = _events.isEmpty ? 0 : _events.first.seq;
+  }
+
+  /// 上拉加载更早的历史。
+  Future<void> _loadOlder() async {
+    if (_loadingOlder || !_hasMore || _oldestSeq <= 1) return;
+    setState(() => _loadingOlder = true);
+    final before = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
+    try {
+      final page = await widget.client.history(
+        widget.session.sessionId,
+        throughSeq: _lastSeq,
+        beforeSeq: _oldestSeq,
+        maxMessages: _pageSize,
+        turnWindow: const TurnWindow(120, 12),
+      );
+      if (!mounted) return;
+      final older = page.events.where((e) => e.seq < _oldestSeq).toList(growable: false);
+      setState(() {
+        _loadingOlder = false;
+        _hasMore = page.hasMore;
+        if (older.isNotEmpty) {
+          _events.insertAll(0, older);
+          _rebuild();
+        }
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scroll.hasClients) return;
+        final after = _scroll.position.maxScrollExtent;
+        final delta = after - before;
+        if (delta > 0) _scroll.jumpTo(_scroll.position.pixels + delta);
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loadingOlder = false);
     }
   }
 
@@ -1099,21 +1158,18 @@ class _ChatViewState extends State<ChatView> {
       final page = await widget.client.history(
         widget.session.sessionId,
         throughSeq: asOf,
-        maxMessages: 40,
+        maxMessages: _pageSize,
+        turnWindow: const TurnWindow(120, 12),
       );
       if (!mounted) return;
       setState(() {
-        _turns.clear();
-        _orphanUsers.clear();
-        _orphanAnswers.clear();
-        _approvals.clear();
-        _questions.clear();
-        for (final event in page.events) {
-          _ingest(event);
-        }
+        _events
+          ..clear()
+          ..addAll(page.events);
+        _hasMore = page.hasMore;
         _lastSeq = page.events.isEmpty ? asOf : page.events.last.seq;
         _error = null;
-        _replayPendingApprovals(page.events);
+        _rebuild();
       });
       _retryAttempt = 0;
       widget.onApprovalPending?.call(_approvals.isNotEmpty || _questions.isNotEmpty);
@@ -1141,6 +1197,7 @@ class _ChatViewState extends State<ChatView> {
         if (event is SessionLogEvent) {
           if (event.seq <= _lastSeq) return;
           setState(() {
+            _events.add(event);
             _ingest(event);
             _lastSeq = event.seq;
           });
@@ -1299,7 +1356,9 @@ class _ChatViewState extends State<ChatView> {
         final reason = data['reason'];
         turn.endKind = reason is Map ? reason['kind'] as String? : null;
         final refresh = widget.onTurnEnd;
-        if (refresh != null) Future<void>.delayed(const Duration(milliseconds: 900), refresh);
+        if (!_replaying && refresh != null) {
+          Future<void>.delayed(const Duration(milliseconds: 900), refresh);
+        }
         return;
       default:
         return;
@@ -1496,6 +1555,31 @@ class _ChatViewState extends State<ChatView> {
     _input.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  Widget _olderHint() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (_loadingOlder) ...[
+            const SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(strokeWidth: 1.6, color: T.textTertiary),
+            ),
+            const SizedBox(width: 8),
+            const Text('加载更早的消息…',
+                style: TextStyle(fontSize: T.tiny, color: T.textTertiary)),
+          ] else
+            Text(
+              _hasMore ? '上滑加载更早的消息' : '没有更多了',
+              style: const TextStyle(fontSize: T.tiny, color: T.textTertiary),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _userBubble(String text, {bool pending = false}) {
@@ -1975,10 +2059,21 @@ class _ChatViewState extends State<ChatView> {
         Expanded(
           child: _loading
               ? _skeleton()
-              : ListView(
-                  controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
-                  children: children,
+              : NotificationListener<ScrollNotification>(
+                  onNotification: (notification) {
+                    if (notification.metrics.extentBefore < 120 && _hasMore && !_loadingOlder) {
+                      _loadOlder();
+                    }
+                    return false;
+                  },
+                  child: ListView(
+                    controller: _scroll,
+                    padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
+                    children: [
+                      if (_events.isNotEmpty) _olderHint(),
+                      ...children,
+                    ],
+                  ),
                 ),
         ),
         if (_questions.isNotEmpty) _questionPanel(),
