@@ -18,7 +18,7 @@ import 'theme.dart';
 import 'webrtc_connector.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.3';
+const String kAppVersion = '0.3.4';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -924,11 +924,20 @@ class _EmptyChat extends StatelessWidget {
 
 /* ------------------------------------------------------------------ 对话 */
 
-/// 上传到工作区后的文件信息。
+/// 待发送的文件：选完立即出现，上传完成后补上回执。
 class _Upload {
-  _Upload(this.name, this.path);
+  _Upload(this.name, {this.receiptId, this.path, this.uploading = true});
+
   final String name;
-  final String path;
+  String? receiptId;
+  String? path;
+  bool uploading;
+
+  void complete(UploadOutcome outcome) {
+    receiptId = outcome.receiptId;
+    path = outcome.path;
+    uploading = false;
+  }
 }
 
 /// 一条用户消息：文字 + 可选图片。
@@ -1018,9 +1027,16 @@ class _ChatViewState extends State<ChatView> {
   String? _error;
   String _modelLabel = '模型';
 
-  static const Set<String> _nonHumanKinds = {
-    'context', 'system', 'tool', 'runtime-context', 'runtimeContext', 'injected',
-  };
+  /// 当前选中的模型（provider / id），用于面板高亮。
+  String? _modelProvider;
+  String? _modelId;
+
+  /// 模型目录缓存：点开面板立即显示，不再每次请求。
+  ModelCatalog? _modelCatalog;
+
+  /// 缓存的刷新通知器（面板打开时可被后台刷新触发重建）。
+  final ValueNotifier<int> _modelCatalogListenable = ValueNotifier<int>(0);
+  bool _modelLoading = false;
 
   /// 运行时上下文的文本前缀（兜底过滤）。
   static const List<String> _contextPrefixes = [
@@ -1049,7 +1065,11 @@ class _ChatViewState extends State<ChatView> {
   void initState() {
     super.initState();
     final next = widget.session.projections.nextModel;
-    if (next != null) _modelLabel = next.model;
+    if (next != null) {
+      _modelLabel = next.model;
+      _modelProvider = next.provider;
+      _modelId = next.model;
+    }
     _load();
     kResumeTick.addListener(_onResumeSync);
     KeepAliveService.expired.addListener(_onKeepAliveExpired);
@@ -1104,13 +1124,14 @@ class _ChatViewState extends State<ChatView> {
     _orphanAnswers.clear();
     _approvals.clear();
     _questions.clear();
-    final keepPending = _pending;
     _replaying = true;
     for (final event in _events) {
       _ingest(event);
     }
     _replaying = false;
-    _pending = keepPending;
+    // 注意：这里绝不能恢复 _pending。
+    // _ingest 重放历史时，turn/start 会把 _pending 清空；若此处再写回旧值，
+    // 灰色的"发送中"气泡就会复活，和真实消息并排显示两条一模一样的。
     _oldestSeq = _events.isEmpty ? 0 : _events.first.seq;
   }
 
@@ -1118,7 +1139,6 @@ class _ChatViewState extends State<ChatView> {
   Future<void> _loadOlder() async {
     if (_loadingOlder || !_hasMore || _oldestSeq <= 1) return;
     setState(() => _loadingOlder = true);
-    final before = _scroll.hasClients ? _scroll.position.maxScrollExtent : 0.0;
     try {
       final page = await widget.client.history(
         widget.session.sessionId,
@@ -1137,12 +1157,7 @@ class _ChatViewState extends State<ChatView> {
           _rebuild();
         }
       });
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scroll.hasClients) return;
-        final after = _scroll.position.maxScrollExtent;
-        final delta = after - before;
-        if (delta > 0) _scroll.jumpTo(_scroll.position.pixels + delta);
-      });
+      // 反向列表里，旧内容追加在末尾（视觉顶部），不需要任何滚动补偿。
     } catch (_) {
       if (mounted) setState(() => _loadingOlder = false);
     }
@@ -1156,12 +1171,12 @@ class _ChatViewState extends State<ChatView> {
     _retryAttempt += 1;
     _retryTimer = Timer(delay, () {
       _retryTimer = null;
-      _resync(force: true);
+      _resync();
     });
   }
 
   /// 重新拉历史基线 + 重新订阅。
-  Future<void> _resync({bool force = false}) async {
+  Future<void> _resync() async {
     if (_resyncing) return;
     _resyncing = true;
     try {
@@ -1196,7 +1211,7 @@ class _ChatViewState extends State<ChatView> {
       });
       _retryAttempt = 0;
       widget.onApprovalPending?.call(_approvals.isNotEmpty || _questions.isNotEmpty);
-      if (force) _scrollToEnd(force: true);
+      // 不再强制跳到底：重连/切回前台时用户可能正在看历史。
 
       // 重新订阅（旧订阅可能已经静默失效）。
       _sub?.cancel();
@@ -1270,7 +1285,7 @@ class _ChatViewState extends State<ChatView> {
           setState(() => _error = ok ? null : '连接已断开，正在重连…');
           if (ok && _wasDisconnected) {
             _wasDisconnected = false;
-            _resync(force: true);
+            _resync();
           } else if (!ok) {
             _wasDisconnected = true;
           }
@@ -1293,7 +1308,7 @@ class _ChatViewState extends State<ChatView> {
   }
 
   void _onResumeSync() {
-    _resync(force: true);
+    _resync();
   }
 
   /// 从历史里恢复「问了但没决定」的审批（订阅前就挂起的那种）。
@@ -1330,7 +1345,10 @@ class _ChatViewState extends State<ChatView> {
         final map = message is Map ? message : data;
         final source = map['source'];
         final kind = source is Map ? source['kind'] as String? : null;
-        if (kind != null && _nonHumanKinds.contains(kind)) return;
+        // 白名单：只有真正由人发出的消息才显示。
+        // DSH 会注入 time-context / model-selection / agent-instructions /
+        // runtime context 等，它们的 kind 各不相同，黑名单永远补不全。
+        if (kind != null && kind != 'user') return;
         final content = map['content'];
         final text = visibleTextOf(content);
         final images = imagePartsOf(content);
@@ -1385,8 +1403,9 @@ class _ChatViewState extends State<ChatView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       final position = _scroll.position;
-      final nearBottom = position.pixels >= position.maxScrollExtent - 140;
-      if (force || nearBottom) _scroll.jumpTo(position.maxScrollExtent);
+      // reverse:true → offset 0 就是视觉底部
+      final nearBottom = position.pixels <= 80;
+      if (force || nearBottom) _scroll.jumpTo(0);
     });
   }
 
@@ -1394,9 +1413,23 @@ class _ChatViewState extends State<ChatView> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
+    if (_uploads.any((u) => u.uploading)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('文件还在上传，请稍候')),
+      );
+      return;
+    }
     if ((text.isEmpty && _uploads.isEmpty && _pendingImages.isEmpty) || _sending) return;
     final uploads = List<_Upload>.from(_uploads);
     final images = List<PendingImage>.from(_pendingImages);
+    final receiptIds = [
+      for (final upload in uploads)
+        if (upload.receiptId != null) upload.receiptId!,
+    ];
+    final workspacePaths = [
+      for (final upload in uploads)
+        if (upload.path != null) upload.path!,
+    ];
     setState(() {
       _sending = true;
       _pending = text.isEmpty ? null : text;
@@ -1405,15 +1438,16 @@ class _ChatViewState extends State<ChatView> {
     _scrollToEnd(force: true);
     try {
       final buffer = StringBuffer(text.isEmpty ? '' : text);
-      if (uploads.isNotEmpty) {
+      if (workspacePaths.isNotEmpty) {
         buffer.write('\n\n已上传文件：');
-        buffer.write(uploads.map((e) => e.path).join('\n'));
+        buffer.write(workspacePaths.join('\n'));
       }
       final body = buffer.toString().trim();
       await widget.client.prompt(
         widget.session.sessionId,
-        body.isEmpty ? '（已发送图片）' : body,
+        body.isEmpty ? '（已发送附件）' : body,
         images: [for (final image in images) image.toPromptImage()],
+        fileReceiptIds: receiptIds,
       );
       if (mounted) {
         setState(() {
@@ -1546,12 +1580,23 @@ class _ChatViewState extends State<ChatView> {
         );
         return;
       }
-      setState(() => _uploading = true);
-      final picked = PickedUpload(file.name, bytes);
-      final path = await uploadToSession(widget.client, widget.session.sessionId, picked);
-      if (!mounted) return;
-      setState(() => _uploads.add(_Upload(picked.name, path)));
+      // 立刻显示卡片（上传中），上传完成后原地更新为可发送
+      final placeholder = _Upload(file.name);
+      setState(() {
+        _uploads.add(placeholder);
+        _uploading = true;
+      });
       _scrollToEnd(force: true);
+      final picked = PickedUpload(file.name, bytes);
+      try {
+        final outcome = await uploadToSession(widget.client, widget.session.sessionId, picked);
+        if (!mounted) return;
+        setState(() => placeholder.complete(outcome));
+      } catch (error) {
+        if (!mounted) return;
+        setState(() => _uploads.remove(placeholder));
+        rethrow;
+      }
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('上传失败：$error')));
@@ -1624,56 +1669,136 @@ class _ChatViewState extends State<ChatView> {
   }
 
   Future<void> _pickModel() async {
-    try {
-      final catalog = await widget.client.listModels();
+    // 先弹出面板（用缓存），后台再刷新列表，避免每次点都卡一下。
+    final cached = _modelCatalog;
+    if (cached == null) {
+      setState(() => _modelLoading = true);
+      try {
+        _modelCatalog = await widget.client.listModels();
+      } catch (error) {
+        if (mounted) {
+          setState(() => _modelLoading = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('加载模型失败：$error')));
+        }
+        return;
+      }
       if (!mounted) return;
-      final chosen = await showModalBottomSheet<({String provider, String model, String name})>(
-        context: context,
-        backgroundColor: T.bg,
-        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-        builder: (context) => SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              for (final group in catalog.groups) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
-                  child: Text(group.name,
-                      style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
-                ),
-                for (final model in group.models)
-                  SizedBox(
-                    height: 52,
-                    child: InkWell(
-                      onTap: () => Navigator.pop(
-                        context,
-                        (provider: group.id, model: model.id, name: model.name),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 20),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(model.name, style: const TextStyle(fontSize: T.body)),
-                            ),
-                            if (model.id == _modelLabel)
-                              const Icon(Icons.check_rounded, size: 20, color: T.brand),
-                          ],
-                        ),
-                      ),
-                    ),
+      setState(() => _modelLoading = false);
+    }
+
+    final chosen = await showModalBottomSheet<({String provider, String model, String name})>(
+      context: context,
+      backgroundColor: T.bg,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetContext) => SafeArea(
+        child: ListenableBuilder(
+          listenable: _modelCatalogListenable,
+          builder: (context, _) {
+            final catalog = _modelCatalog;
+            if (catalog == null) {
+              return const Padding(
+                padding: EdgeInsets.all(40),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              );
+            }
+            return ListView(
+              shrinkWrap: true,
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+              children: [
+                for (final group in catalog.groups) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 14, 8, 6),
+                    child: Text(group.name,
+                        style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
                   ),
+                  for (final model in group.models)
+                    _modelRow(
+                      sheetContext,
+                      provider: group.id,
+                      id: model.id,
+                      name: model.name,
+                    ),
+                ],
               ],
+            );
+          },
+        ),
+      ),
+    );
+
+    if (chosen == null || !mounted) return;
+
+    // 立即更新胶囊，不等网络往返。
+    final previousLabel = _modelLabel;
+    final previousProvider = _modelProvider;
+    final previousId = _modelId;
+    setState(() {
+      _modelLabel = chosen.name;
+      _modelProvider = chosen.provider;
+      _modelId = chosen.model;
+    });
+    try {
+      await widget.client.setModel(
+        widget.session.sessionId,
+        provider: chosen.provider,
+        model: chosen.model,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _modelLabel = previousLabel;
+        _modelProvider = previousProvider;
+        _modelId = previousId;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('切换失败：$error')));
+    }
+  }
+
+  /// 模型行：选中项整行浅蓝底 + 蓝字 + 左侧竖条。
+  Widget _modelRow(
+    BuildContext sheetContext, {
+    required String provider,
+    required String id,
+    required String name,
+  }) {
+    final selected = provider == _modelProvider && id == _modelId;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.pop(sheetContext, (provider: provider, model: id, name: name)),
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 52),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFEDF1FF) : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            border: Border(
+              left: BorderSide(
+                color: selected ? T.brand : Colors.transparent,
+                width: 3,
+              ),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  name,
+                  style: TextStyle(
+                    fontSize: T.body,
+                    color: selected ? T.brand : T.text,
+                    fontWeight: selected ? FontWeight.w600 : null,
+                  ),
+                ),
+              ),
+              if (selected)
+                const Icon(Icons.check_circle_rounded, size: 22, color: T.brand),
             ],
           ),
         ),
-      );
-      if (chosen == null) return;
-      await widget.client.setModel(widget.session.sessionId, provider: chosen.provider, model: chosen.model);
-      if (mounted) setState(() => _modelLabel = chosen.name);
-    } catch (error) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('切换失败：$error')));
-    }
+      ),
+    );
   }
 
   @override
@@ -1866,7 +1991,15 @@ class _ChatViewState extends State<ChatView> {
     }
     // 乐观发送的灰泡放在本轮用户消息之后、状态行之前，避免列表末尾二次跳动
     if (_pending != null && identical(turn, _turns.isNotEmpty ? _turns.last : null)) {
-      widgets.add(_userBubble(_UserMsg(_pending!), pending: true));
+      // 兜底去重：本轮已有同文本的用户消息时，不再画灰泡
+      final pendingText = _pending!.trim();
+      final alreadyThere = turn.users.any((u) {
+        final text = u.text.trim();
+        return text.isNotEmpty && (text.contains(pendingText) || pendingText.contains(text));
+      });
+      if (!alreadyThere) {
+        widgets.add(_userBubble(_UserMsg(_pending!), pending: true));
+      }
     }
     widgets.add(_statusLine(turn));
     for (final answer in turn.answers) {
@@ -2134,6 +2267,15 @@ class _ChatViewState extends State<ChatView> {
                               ),
                             ),
                             const SizedBox(width: 4),
+                            if (_uploads[i].uploading)
+                              const Padding(
+                                padding: EdgeInsets.only(right: 6),
+                                child: SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(strokeWidth: 1.6, color: T.brand),
+                                ),
+                              ),
                             InkWell(
                               onTap: () => setState(() => _uploads.removeAt(i)),
                               child: const Icon(Icons.close_rounded, size: 14, color: T.brand),
@@ -2257,6 +2399,9 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   Widget build(BuildContext context) {
+    // 按"旧 → 新"构造，然后用 reverse:true 反转。
+    // 反向列表的视口锚在底部：新消息向下延伸、加载历史向上追加，
+    // 都不会推动当前可视内容，因此不会跳页。
     final children = <Widget>[];
     for (final msg in _orphanUsers) {
       children.add(_userBubble(msg));
@@ -2265,7 +2410,13 @@ class _ChatViewState extends State<ChatView> {
       children.add(_answerBlock(text));
     }
     for (final turn in _turns) {
-      children.addAll(_turnWidgets(turn));
+      children.add(KeyedSubtree(
+        key: ValueKey<int>(turn.turn),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: _turnWidgets(turn),
+        ),
+      ));
     }
     if (_pending != null && _turns.isEmpty) {
       children.add(_userBubble(_UserMsg(_pending!), pending: true));
@@ -2285,17 +2436,19 @@ class _ChatViewState extends State<ChatView> {
               ? _skeleton()
               : NotificationListener<ScrollNotification>(
                   onNotification: (notification) {
-                    if (notification.metrics.extentBefore < 120 && _hasMore && !_loadingOlder) {
+                    // reverse:true 时，extentAfter 才是"距离视觉顶部"的距离
+                    if (notification.metrics.extentAfter < 200 && _hasMore && !_loadingOlder) {
                       _loadOlder();
                     }
                     return false;
                   },
                   child: ListView(
                     controller: _scroll,
+                    reverse: true,
                     padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
                     children: [
+                      ...children.reversed,
                       if (_events.isNotEmpty) _olderHint(),
-                      ...children,
                     ],
                   ),
                 ),

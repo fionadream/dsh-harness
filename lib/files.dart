@@ -37,9 +37,27 @@ Future<PickedUpload?> pickFileForUpload() async {
   return PickedUpload(file.name, bytes);
 }
 
-/// 上传到会话工作区，返回文件在工作区里的相对路径。
-/// 中继通道没有文件回执接口，只能走 `workspace.upload.v1`。
-Future<String> uploadToSession(
+/// 上传结果：要么是文件回执（真附件），要么是工作区相对路径（回落方案）。
+class UploadOutcome {
+  const UploadOutcome.receipt(this.receiptId, this.name) : path = null;
+  const UploadOutcome.workspace(this.path, this.name) : receiptId = null;
+
+  final String? receiptId;
+  final String? path;
+  final String name;
+
+  bool get isReceipt => receiptId != null;
+}
+
+/// 上传到会话。
+///
+/// 优先走 `uploadFile`：整个文件一次 RPC 发走（≤30 MiB），**只有一次往返**，
+/// 返回的 receiptId 可直接传 `prompt(fileReceiptIds:)`，是真正的附件。
+/// dsh-Go 用的就是这条路径。
+///
+/// 该 Host 不支持时（旧版本 / 通道限制），自动回落到 `uploadWorkspaceFile`
+/// ——它按 64 KiB 分块、每块等确认，慢但可用。
+Future<UploadOutcome> uploadToSession(
   DshClient client,
   String sessionId,
   PickedUpload picked,
@@ -47,12 +65,20 @@ Future<String> uploadToSession(
   if (picked.size > kMaxUploadBytes) {
     throw Exception('文件超过 30 MiB，请先压缩或拆分');
   }
+  try {
+    final receipt = await client.uploadFile(sessionId, picked.bytes, name: picked.name);
+    if (receipt.receiptId.isNotEmpty) {
+      return UploadOutcome.receipt(receipt.receiptId, picked.name);
+    }
+  } catch (_) {
+    // 落到下面的工作区上传
+  }
   final uploaded = await client.uploadWorkspaceFile(
     sessionId,
     picked.bytes,
     name: picked.name,
   );
-  return uploaded.path;
+  return UploadOutcome.workspace(uploaded.path, picked.name);
 }
 
 /* ------------------------------------------------------------ 保存目录 */
