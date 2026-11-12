@@ -6,12 +6,14 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
+import 'filebrowser.dart';
+import 'files.dart';
 import 'markdown.dart';
 import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.30';
+const String kAppVersion = '0.2.31';
 
 void main() => runApp(const DshMiniApp());
 
@@ -57,6 +59,21 @@ class SecureStore implements SecretStore {
 }
 
 RemoteAccount? _account;
+
+/// 供其它页面复用的安全存储读写。
+Future<String?> secureStoreRead(String key) async {
+  try {
+    return await SecureStore().read(key);
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<void> secureStoreWrite(String key, String value) async {
+  try {
+    await SecureStore().write(key, value);
+  } catch (_) {}
+}
 
 RemoteAccount get account => _account ??= RemoteAccount(
       secrets: SecureStore(),
@@ -318,12 +335,14 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const _collapsedKey = 'drawer.collapsed';
   static const _readAtKey = 'sessions.readAt';
+  static const _saveDirKey = 'files.saveDir';
 
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
   List<Workspace> _workspaces = const [];
   Set<String> _collapsed = {};
   final Map<String, DateTime> _readAt = {};
+  String? _saveDir;
   SessionSummary? _current;
   bool _currentHasApproval = false;
   bool _loading = true;
@@ -335,6 +354,15 @@ class _HomePageState extends State<HomePage> {
     _loadSessions();
     _loadDrawerState();
     _loadReadState();
+    _loadSaveDir();
+  }
+
+  Future<void> _loadSaveDir() async {
+    try {
+      final raw = await SecureStore().read(_saveDirKey);
+      if (!mounted || raw == null) return;
+      setState(() => _saveDir = raw.isEmpty ? null : raw);
+    } catch (_) {}
   }
 
   Future<void> _loadDrawerState() async {
@@ -737,6 +765,27 @@ class _HomePageState extends State<HomePage> {
           title: Text(_current?.projections.title ?? '新对话'),
           actions: [
             IconButton(
+              icon: const Icon(Icons.folder_outlined, size: 22),
+              onPressed: () {
+                final session = _current;
+                if (session == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('先打开一个会话，再浏览它的工作区文件')),
+                  );
+                  return;
+                }
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => FileBrowserPage(
+                      client: widget.client,
+                      sessionId: session.sessionId,
+                      saveDir: _saveDir,
+                    ),
+                  ),
+                );
+              },
+            ),
+            IconButton(
               icon: const Icon(Icons.add_circle_outline_rounded, size: 24),
               onPressed: () => showModalBottomSheet<void>(
                 context: context,
@@ -848,6 +897,8 @@ class _ChatViewState extends State<ChatView> {
   final List<UserQuestionRequest> _questions = [];
   final Map<String, Set<String>> _picked = {};
   final List<String> _audit = [];
+  final List<({String receiptId, String name})> _uploads = [];
+  bool _uploading = false;
   final _input = TextEditingController();
   final _scroll = ScrollController();
   StreamSubscription<DshEvent>? _sub;
@@ -992,17 +1043,10 @@ class _ChatViewState extends State<ChatView> {
     if (asked.isNotEmpty) widget.onApprovalPending?.call(true);
   }
 
-  bool _isDangerous(ApprovalRequest request) {
-    final haystack = [
-      request.reason ?? '',
-      ...request.displayReason.values,
-    ].join(' ').toLowerCase();
-    return haystack.contains('danger-full-access') || haystack.contains('danger_full_access');
-  }
-
   void _onApproval(ApprovalRequest request) {
     if (_approvals.any((a) => a.eventId == request.eventId)) return;
-    if (_autoAllow && !_isDangerous(request)) {
+    // 「全部允许」开启后，本会话所有审批一律自动通过（用户 2026-11-12 选择方案 A）。
+    if (_autoAllow) {
       _answer(request, ApprovalDecision.allowOnce, silent: true);
       return;
     }
@@ -1078,15 +1122,21 @@ class _ChatViewState extends State<ChatView> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if (text.isEmpty || _sending) return;
+    if ((text.isEmpty && _uploads.isEmpty) || _sending) return;
+    final receipts = _uploads.map((e) => e.receiptId).toList(growable: false);
     setState(() {
       _sending = true;
-      _pending = text;
+      _pending = text.isEmpty ? null : text;
     });
     _input.clear();
     _scrollToEnd(force: true);
     try {
-      await widget.client.prompt(widget.session.sessionId, text);
+      await widget.client.prompt(
+        widget.session.sessionId,
+        text.isEmpty ? '（已发送文件）' : text,
+        fileReceiptIds: receipts,
+      );
+      if (receipts.isNotEmpty && mounted) setState(_uploads.clear);
     } catch (error) {
       if (mounted) {
         setState(() => _pending = null);
@@ -1094,6 +1144,30 @@ class _ChatViewState extends State<ChatView> {
       }
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _attachFile() async {
+    if (_uploading) return;
+    try {
+      final picked = await pickFileForUpload();
+      if (picked == null || !mounted) return;
+      if (picked.size > kMaxUploadBytes) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('文件超过 30 MiB，请先压缩或拆分')),
+        );
+        return;
+      }
+      setState(() => _uploading = true);
+      final upload = await uploadToSession(widget.client, widget.session.sessionId, picked);
+      if (!mounted) return;
+      setState(() => _uploads.add(upload));
+      _scrollToEnd(force: true);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('上传失败：$error')));
+    } finally {
+      if (mounted) setState(() => _uploading = false);
     }
   }
 
@@ -1152,7 +1226,7 @@ class _ChatViewState extends State<ChatView> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('开启自动允许？'),
-        content: const Text('本次会话内，所有审批都会自动通过；只有提权到完全访问（danger-full-access）的请求仍会问你。'),
+        content: const Text('本次会话内，所有审批都会自动通过，不再逐条询问。'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('开启')),
@@ -1321,24 +1395,39 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
-  Widget _circleAction({
+  Widget _barAction({
     required IconData icon,
-    required Color background,
-    required Color foreground,
-    bool outlined = false,
+    required String label,
+    required Color color,
+    bool filled = false,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          color: outlined ? Colors.transparent : background,
-          shape: BoxShape.circle,
-          border: outlined ? Border.all(color: background, width: 1.4) : null,
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          height: 44,
+          decoration: BoxDecoration(
+            color: filled ? color : Colors.transparent,
+            borderRadius: BorderRadius.circular(22),
+            border: filled ? null : Border.all(color: color, width: 1.2),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 18, color: filled ? Colors.white : color),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: weightOf(kWeight.value),
+                  color: filled ? Colors.white : color,
+                ),
+              ),
+            ],
+          ),
         ),
-        child: Icon(icon, size: 20, color: foreground),
       ),
     );
   }
@@ -1373,38 +1462,39 @@ class _ChatViewState extends State<ChatView> {
           const SizedBox(height: 12),
           Row(
             children: [
-              _circleAction(
+              _barAction(
                 icon: Icons.close_rounded,
-                background: T.danger,
-                foreground: T.danger,
-                outlined: true,
+                label: '拒绝',
+                color: T.danger,
                 onTap: () => _answer(request, ApprovalDecision.reject),
               ),
-              const SizedBox(width: 14),
-              _circleAction(
+              const SizedBox(width: 12),
+              _barAction(
                 icon: Icons.check_rounded,
-                background: T.brand,
-                foreground: Colors.white,
+                label: '允许',
+                color: T.brand,
+                filled: true,
                 onTap: () => _answer(request, ApprovalDecision.allowOnce),
               ),
-              const SizedBox(width: 14),
-              _circleAction(
+              const SizedBox(width: 12),
+              _barAction(
                 icon: Icons.bolt_rounded,
-                background: const Color(0xFFF5A623),
-                foreground: Colors.white,
+                label: '全部',
+                color: T.warn,
                 onTap: () async {
                   await _toggleAutoAllow();
                   if (!mounted || !_autoAllow) return;
-                  if (!_isDangerous(request)) {
-                    await _answer(request, ApprovalDecision.allowOnce, silent: true);
-                  }
+                  await _answer(request, ApprovalDecision.allowOnce, silent: true);
                 },
               ),
-              const Spacer(),
-              if (rest > 0)
-                Text('还有 $rest 条', style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
             ],
           ),
+          if (rest > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text('还有 $rest 条待确认',
+                  style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+            ),
         ],
       ),
     );
@@ -1503,6 +1593,45 @@ class _ChatViewState extends State<ChatView> {
         padding: const EdgeInsets.fromLTRB(18, 6, 10, 10),
         child: Column(
           children: [
+            if (_uploads.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 4),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (var i = 0; i < _uploads.length; i += 1)
+                      Container(
+                        padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+                        decoration: BoxDecoration(
+                          color: T.chipBg,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.insert_drive_file_outlined, size: 14, color: T.brand),
+                            const SizedBox(width: 6),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 170),
+                              child: Text(
+                                _uploads[i].name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: T.tiny, color: T.brand),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            InkWell(
+                              onTap: () => setState(() => _uploads.removeAt(i)),
+                              child: const Icon(Icons.close_rounded, size: 14, color: T.brand),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             TextField(
               controller: _input,
               minLines: 1,
@@ -1518,6 +1647,21 @@ class _ChatViewState extends State<ChatView> {
             ),
             Row(
               children: [
+                GestureDetector(
+                  onTap: _uploading ? null : _attachFile,
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: const BoxDecoration(color: T.chipBg, shape: BoxShape.circle),
+                    child: _uploading
+                        ? const Padding(
+                            padding: EdgeInsets.all(8),
+                            child: CircularProgressIndicator(strokeWidth: 2, color: T.brand),
+                          )
+                        : const Icon(Icons.add_rounded, size: 20, color: T.brand),
+                  ),
+                ),
+                const SizedBox(width: 8),
                 _chip(icon: Icons.tune_rounded, label: _modelLabel, onTap: _pickModel),
                 const Spacer(),
                 if (_running)
