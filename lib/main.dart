@@ -13,9 +13,10 @@ import 'keepalive.dart';
 import 'markdown.dart';
 import 'settings.dart';
 import 'theme.dart';
+import 'webrtc_connector.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.38';
+const String kAppVersion = '0.3.0';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -23,6 +24,8 @@ final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   KeepAliveService.init();
+  // 启用 WebRTC 直连（LAN / P2P / TURN）；失败时库内自动回落中继。
+  account.peerConnector = createDshPeerConnector;
   runApp(const DshMiniApp());
 }
 

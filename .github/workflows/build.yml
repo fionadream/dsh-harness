@@ -42,6 +42,8 @@ jobs:
               'android.permission.FOREGROUND_SERVICE',
               'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
               'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+              'android.permission.ACCESS_NETWORK_STATE',
+              'android.permission.CHANGE_NETWORK_STATE',
           ]
           for perm in perms:
               if perm not in t:
@@ -64,6 +66,9 @@ jobs:
               s = s.replace('compileSdkVersion flutter.compileSdkVersion', 'compileSdkVersion 36')
               s = s.replace('compileSdk = 34', 'compileSdk = 36')
               s = s.replace('compileSdkVersion 34', 'compileSdkVersion 36')
+              # flutter_webrtc 要求 minSdk >= 23
+              s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
+              s = s.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 23')
               g.write_text(s, encoding='utf-8')
               print('patched compileSdk in', name)
           PY
