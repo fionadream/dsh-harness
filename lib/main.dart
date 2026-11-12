@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
 import 'filebrowser.dart';
 import 'filecard.dart';
 import 'files.dart';
+import 'images.dart';
 import 'keepalive.dart';
 import 'markdown.dart';
 import 'settings.dart';
@@ -16,7 +18,7 @@ import 'theme.dart';
 import 'webrtc_connector.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.1';
+const String kAppVersion = '0.3.3';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -929,13 +931,20 @@ class _Upload {
   final String path;
 }
 
+/// 一条用户消息：文字 + 可选图片。
+class _UserMsg {
+  _UserMsg(this.text, [this.images = const []]);
+  final String text;
+  final List<ImageAttachment> images;
+}
+
 class _Turn {
   _Turn(this.turn, this.start);
   final int turn;
   final DateTime start;
   DateTime? end;
   String? endKind;
-  final List<String> users = [];
+  final List<_UserMsg> users = [];
   final List<String> answers = [];
   String live = '';
 
@@ -977,7 +986,7 @@ class ChatView extends StatefulWidget {
 
 class _ChatViewState extends State<ChatView> {
   final List<_Turn> _turns = [];
-  final List<String> _orphanUsers = [];
+  final List<_UserMsg> _orphanUsers = [];
   final List<String> _orphanAnswers = [];
   final List<SessionLogEvent> _events = [];
   int _oldestSeq = 0;
@@ -992,6 +1001,7 @@ class _ChatViewState extends State<ChatView> {
   final Map<String, Set<String>> _picked = {};
   Timer? _clock;
   final List<_Upload> _uploads = [];
+  final List<PendingImage> _pendingImages = [];
   bool _uploading = false;
   final _input = TextEditingController();
   final _scroll = ScrollController();
@@ -1321,20 +1331,25 @@ class _ChatViewState extends State<ChatView> {
         final source = map['source'];
         final kind = source is Map ? source['kind'] as String? : null;
         if (kind != null && _nonHumanKinds.contains(kind)) return;
-        final text = visibleTextOf(map['content']);
-        if (text.trim().isEmpty) return;
+        final content = map['content'];
+        final text = visibleTextOf(content);
+        final images = imagePartsOf(content);
+        if (text.trim().isEmpty && images.isEmpty) return;
         final head = text.trimLeft();
-        if (_contextPrefixes.any(head.startsWith)) return;
-        if (_isMetaNotice(text)) return;
-        if (_pending != null) {
+        if (text.trim().isNotEmpty) {
+          if (_contextPrefixes.any(head.startsWith)) return;
+          if (_isMetaNotice(text)) return;
+        }
+        if (_pending != null && text.trim().isNotEmpty) {
           final pending = _pending!.trim();
           final incoming = text.trim();
           if (incoming.contains(pending) || pending.contains(incoming)) _pending = null;
         }
+        final userMsg = _UserMsg(text, images);
         if (_turns.isEmpty) {
-          _orphanUsers.add(text);
+          _orphanUsers.add(userMsg);
         } else {
-          _turns.last.users.add(text);
+          _turns.last.users.add(userMsg);
         }
         return;
       case 'assistant/message':
@@ -1379,8 +1394,9 @@ class _ChatViewState extends State<ChatView> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if ((text.isEmpty && _uploads.isEmpty) || _sending) return;
+    if ((text.isEmpty && _uploads.isEmpty && _pendingImages.isEmpty) || _sending) return;
     final uploads = List<_Upload>.from(_uploads);
+    final images = List<PendingImage>.from(_pendingImages);
     setState(() {
       _sending = true;
       _pending = text.isEmpty ? null : text;
@@ -1393,8 +1409,18 @@ class _ChatViewState extends State<ChatView> {
         buffer.write('\n\n已上传文件：');
         buffer.write(uploads.map((e) => e.path).join('\n'));
       }
-      await widget.client.prompt(widget.session.sessionId, buffer.toString().trim());
-      if (uploads.isNotEmpty && mounted) setState(_uploads.clear);
+      final body = buffer.toString().trim();
+      await widget.client.prompt(
+        widget.session.sessionId,
+        body.isEmpty ? '（已发送图片）' : body,
+        images: [for (final image in images) image.toPromptImage()],
+      );
+      if (mounted) {
+        setState(() {
+          if (uploads.isNotEmpty) _uploads.clear();
+          if (images.isNotEmpty) _pendingImages.clear();
+        });
+      }
       // 兜底：30 秒内没等到真实消息，也把灰泡清掉
       Future<void>.delayed(const Duration(seconds: 30), () {
         if (mounted && _pending != null) setState(() => _pending = null);
@@ -1409,18 +1435,119 @@ class _ChatViewState extends State<ChatView> {
     }
   }
 
-  Future<void> _attachFile() async {
+  /// 点 ＋ 弹出的附件面板（相册 / 文件）。
+  Future<void> _openAttachSheet() async {
+    if (_uploading) return;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFFF3F3F5),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(22))),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 10, 24, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFC9C9CE),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 28),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _attachTile(
+                    icon: Icons.image_outlined,
+                    label: '相册',
+                    background: const Color(0xFFDCE9FF),
+                    foreground: const Color(0xFF2F6FE4),
+                    onTap: () => Navigator.pop(context, 'image'),
+                  ),
+                  _attachTile(
+                    icon: Icons.folder_outlined,
+                    label: '文件',
+                    background: const Color(0xFFFFE7C7),
+                    foreground: const Color(0xFFD98600),
+                    onTap: () => Navigator.pop(context, 'file'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    await _pickAndUpload(imagesOnly: choice == 'image');
+  }
+
+  Widget _attachTile({
+    required IconData icon,
+    required String label,
+    required Color background,
+    required Color foreground,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        children: [
+          Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: background,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Icon(icon, size: 28, color: foreground),
+          ),
+          const SizedBox(height: 10),
+          Text(label, style: const TextStyle(fontSize: 14, color: T.text)),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickAndUpload({required bool imagesOnly}) async {
     if (_uploading) return;
     try {
-      final picked = await pickFileForUpload();
-      if (picked == null || !mounted) return;
-      if (picked.size > kMaxUploadBytes) {
+      final result = await FilePicker.platform.pickFiles(
+        type: imagesOnly ? FileType.image : FileType.any,
+        allowMultiple: imagesOnly,
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty || !mounted) return;
+
+      // 图片：本地压缩后直接进待发送列表，不走工作区上传（秒回）
+      if (imagesOnly) {
+        final added = <PendingImage>[];
+        for (final file in result.files) {
+          final raw = file.bytes;
+          if (raw == null) continue;
+          final bytes = await prepareImageForSend(raw);
+          added.add(PendingImage(bytes, file.name));
+        }
+        if (added.isEmpty || !mounted) return;
+        setState(() => _pendingImages.addAll(added));
+        _scrollToEnd(force: true);
+        return;
+      }
+
+      final file = result.files.first;
+      final bytes = file.bytes;
+      if (bytes == null) return;
+      if (bytes.length > kMaxUploadBytes) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('文件超过 30 MiB，请先压缩或拆分')),
         );
         return;
       }
       setState(() => _uploading = true);
+      final picked = PickedUpload(file.name, bytes);
       final path = await uploadToSession(widget.client, widget.session.sessionId, picked);
       if (!mounted) return;
       setState(() => _uploads.add(_Upload(picked.name, path)));
@@ -1585,11 +1712,12 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
-  Widget _userBubble(String text, {bool pending = false}) {
+  Widget _userBubble(_UserMsg msg, {bool pending = false}) {
+    final text = msg.text;
     return Align(
       alignment: Alignment.centerRight,
       child: GestureDetector(
-        onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
+        onLongPress: text.isEmpty ? null : () => Clipboard.setData(ClipboardData(text: text)),
         child: Container(
           margin: const EdgeInsets.only(left: 48, top: 8, bottom: 8),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -1598,16 +1726,83 @@ class _ChatViewState extends State<ChatView> {
             color: pending ? const Color(0xFFF2F2F4) : T.bubble,
             borderRadius: BorderRadius.circular(T.rBubble),
           ),
-          child: Text(
-            text,
-            style: TextStyle(
-              fontSize: T.body,
-              height: 1.6,
-              color: pending ? T.textSecondary : T.text,
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (msg.images.isNotEmpty)
+                Padding(
+                  padding: EdgeInsets.only(bottom: text.trim().isEmpty ? 0 : 8),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.end,
+                    children: [
+                      for (final ref in msg.images)
+                        AttachmentImage(
+                          client: widget.client,
+                          sessionId: widget.session.sessionId,
+                          reference: ref,
+                          maxWidth: 160,
+                          maxHeight: 200,
+                        ),
+                    ],
+                  ),
+                ),
+              if (text.trim().isNotEmpty)
+                Text(
+                  text,
+                  style: TextStyle(
+                    fontSize: T.body,
+                    height: 1.6,
+                    color: pending ? T.textSecondary : T.text,
+                  ),
+                ),
+            ],
           ),
         ),
       ),
+    );
+  }
+
+  /// 待发送图片的缩略图（本地字节，零延迟）。
+  Widget _pendingImagesStrip() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (var i = 0; i < _pendingImages.length; i += 1)
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: Image.memory(
+                  _pendingImages[i].bytes,
+                  width: 72,
+                  height: 72,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              Positioned(
+                right: -6,
+                top: -6,
+                child: GestureDetector(
+                  onTap: () => setState(() => _pendingImages.removeAt(i)),
+                  child: Container(
+                    width: 20,
+                    height: 20,
+                    decoration: const BoxDecoration(
+                      color: Color(0xCC000000),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                  ),
+                ),
+              ),
+            ],
+          ),
+      ],
     );
   }
 
@@ -1666,12 +1861,12 @@ class _ChatViewState extends State<ChatView> {
 
   List<Widget> _turnWidgets(_Turn turn) {
     final widgets = <Widget>[];
-    for (final text in turn.users) {
-      widgets.add(_userBubble(text));
+    for (final msg in turn.users) {
+      widgets.add(_userBubble(msg));
     }
     // 乐观发送的灰泡放在本轮用户消息之后、状态行之前，避免列表末尾二次跳动
     if (_pending != null && identical(turn, _turns.isNotEmpty ? _turns.last : null)) {
-      widgets.add(_userBubble(_pending!, pending: true));
+      widgets.add(_userBubble(_UserMsg(_pending!), pending: true));
     }
     widgets.add(_statusLine(turn));
     for (final answer in turn.answers) {
@@ -1902,6 +2097,14 @@ class _ChatViewState extends State<ChatView> {
         padding: const EdgeInsets.fromLTRB(18, 6, 10, 10),
         child: Column(
           children: [
+            if (_pendingImages.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8, bottom: 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _pendingImagesStrip(),
+                ),
+              ),
             if (_uploads.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 8, bottom: 4),
@@ -1957,7 +2160,7 @@ class _ChatViewState extends State<ChatView> {
             Row(
               children: [
                 GestureDetector(
-                  onTap: _uploading ? null : _attachFile,
+                  onTap: _uploading ? null : _openAttachSheet,
                   child: Container(
                     width: 32,
                     height: 32,
@@ -2055,8 +2258,8 @@ class _ChatViewState extends State<ChatView> {
   @override
   Widget build(BuildContext context) {
     final children = <Widget>[];
-    for (final text in _orphanUsers) {
-      children.add(_userBubble(text));
+    for (final msg in _orphanUsers) {
+      children.add(_userBubble(msg));
     }
     for (final text in _orphanAnswers) {
       children.add(_answerBlock(text));
@@ -2065,7 +2268,7 @@ class _ChatViewState extends State<ChatView> {
       children.addAll(_turnWidgets(turn));
     }
     if (_pending != null && _turns.isEmpty) {
-      children.add(_userBubble(_pending!, pending: true));
+      children.add(_userBubble(_UserMsg(_pending!), pending: true));
     }
 
     return Column(
