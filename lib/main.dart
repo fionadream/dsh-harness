@@ -8,10 +8,9 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:dsh_remote/dsh_remote.dart';
 import 'markdown.dart';
 import 'settings.dart';
+import 'theme.dart';
 
 void main() => runApp(const DshMiniApp());
-
-const kBrand = Color(0xFF4D6BFE);
 
 /// 全局字号缩放（设置里可调）。
 final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
@@ -26,12 +25,7 @@ class DshMiniApp extends StatelessWidget {
       builder: (context, scale, _) => MaterialApp(
         title: 'DSH Harness',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          useMaterial3: true,
-          brightness: Brightness.light,
-          colorSchemeSeed: kBrand,
-          scaffoldBackgroundColor: const Color(0xFFF7F8FA),
-        ),
+        theme: T.theme(),
         builder: (context, child) => MediaQuery.withClampedTextScaling(
           minScaleFactor: scale,
           maxScaleFactor: scale,
@@ -134,39 +128,43 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: T.bg,
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
+          padding: const EdgeInsets.symmetric(horizontal: 32),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const CircleAvatar(
-                radius: 34,
-                backgroundColor: Colors.black,
-                child: Icon(Icons.terminal_rounded, color: Colors.white, size: 34),
-              ),
-              const SizedBox(height: 22),
-              const Text('DSH Harness', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 8),
-              const Text('登录后即可连接你在电脑上的 DSH', style: TextStyle(color: Colors.black54)),
-              const SizedBox(height: 40),
+              Image.asset('assets/icon.png', width: 72, height: 72, errorBuilder: (_, __, ___) =>
+                  const Icon(Icons.terminal_rounded, size: 64, color: T.text)),
+              const SizedBox(height: 24),
+              const Text('DSH Harness',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: T.text)),
+              const SizedBox(height: 10),
+              const Text('登录后即可连接你在电脑上的 DSH',
+                  style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
+              const SizedBox(height: 48),
               SizedBox(
                 width: double.infinity,
                 height: 50,
                 child: FilledButton(
                   onPressed: _busy ? null : _signIn,
-                  style: FilledButton.styleFrom(backgroundColor: Colors.black),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: T.text,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(25)),
+                  ),
                   child: _busy
                       ? const SizedBox(
                           width: 20, height: 20,
                           child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                         )
-                      : const Text('使用 GitHub 登录', style: TextStyle(color: Colors.white, fontSize: 16)),
+                      : const Text('使用 GitHub 登录',
+                          style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500)),
                 ),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 18),
-                Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12), textAlign: TextAlign.center),
+                Text(_error!, style: const TextStyle(color: T.danger, fontSize: 13), textAlign: TextAlign.center),
               ],
             ],
           ),
@@ -214,13 +212,13 @@ class _HostsPageState extends State<HostsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: T.bg,
       appBar: AppBar(
         title: const Text('选择电脑'),
         actions: [
           IconButton(
-            tooltip: '刷新',
             onPressed: () => setState(() => _future = account.listHosts()),
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh_rounded, size: 22),
           ),
         ],
       ),
@@ -228,30 +226,68 @@ class _HostsPageState extends State<HostsPage> {
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
+            return const Center(child: CircularProgressIndicator(strokeWidth: 2));
           }
-          if (snapshot.hasError) return Center(child: Text('加载失败：${snapshot.error}'));
+          if (snapshot.hasError) {
+            return Center(
+              child: Text('加载失败：${snapshot.error}',
+                  style: const TextStyle(color: T.textSecondary, fontSize: 14)),
+            );
+          }
           final hosts = snapshot.data ?? const <RemoteHost>[];
-          if (hosts.isEmpty) return const Center(child: Text('没有在线的电脑'));
+          if (hosts.isEmpty) {
+            return const Center(
+              child: Text('没有在线的电脑', style: TextStyle(color: T.textSecondary, fontSize: 15)),
+            );
+          }
           return ListView.separated(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
             itemCount: hosts.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            separatorBuilder: (_, __) => const SizedBox(height: 10),
             itemBuilder: (context, index) {
               final host = hosts[index];
               final busy = _connecting == host.id;
-              return Card(
-                elevation: 0,
-                color: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                child: ListTile(
-                  leading: Icon(Icons.computer_rounded, color: host.online ? kBrand : Colors.grey),
-                  title: Text(host.name),
-                  subtitle: Text(host.online ? '在线' : '离线'),
-                  trailing: busy
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.chevron_right),
+              return Container(
+                decoration: BoxDecoration(
+                  color: T.bg,
+                  borderRadius: BorderRadius.circular(T.rCard),
+                  border: Border.all(color: T.divider),
+                ),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(T.rCard),
                   onTap: host.online && !busy ? () => _connect(host) : null,
+                  child: SizedBox(
+                    height: 64,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          Icon(Icons.computer_rounded,
+                              size: 22, color: host.online ? T.brand : T.textTertiary),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(host.name,
+                                    style: const TextStyle(fontSize: T.body, color: T.text)),
+                                const SizedBox(height: 2),
+                                Text(host.online ? '在线' : '离线',
+                                    style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+                              ],
+                            ),
+                          ),
+                          if (busy)
+                            const SizedBox(
+                                width: 18, height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2))
+                          else
+                            const Icon(Icons.chevron_right, size: 20, color: T.textTertiary),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               );
             },
@@ -385,26 +421,32 @@ class _HomePageState extends State<HomePage> {
   void _actions(SessionSummary session) {
     showModalBottomSheet<void>(
       context: context,
+      backgroundColor: T.bg,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(Icons.drive_file_rename_outline),
-              title: const Text('重命名'),
+            const SizedBox(height: 8),
+            TRow(
+              icon: Icons.drive_file_rename_outline,
+              label: '重命名',
+              showChevron: false,
               onTap: () {
                 Navigator.pop(context);
                 _rename(session);
               },
             ),
-            ListTile(
-              leading: const Icon(Icons.archive_outlined),
-              title: const Text('归档'),
+            TRow(
+              icon: Icons.archive_outlined,
+              label: '归档',
+              showChevron: false,
               onTap: () {
                 Navigator.pop(context);
                 _archive(session);
               },
             ),
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -436,19 +478,42 @@ class _HomePageState extends State<HomePage> {
   Widget _sessionTile(SessionSummary s) {
     final title = s.projections.title ?? '未命名';
     final selected = _current?.sessionId == s.sessionId;
-    return ListTile(
-      dense: true,
-      selected: selected,
-      selectedTileColor: const Color(0xFFEEF2FF),
-      contentPadding: const EdgeInsets.only(left: 34, right: 12),
-      leading: Icon(
-        s.running ? Icons.circle : Icons.chat_bubble_outline_rounded,
-        size: s.running ? 10 : 16,
-        color: s.running ? const Color(0xFF32C48D) : Colors.black38,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _open(s),
+        onLongPress: () => _actions(s),
+        child: Container(
+          height: 48,
+          padding: const EdgeInsets.only(left: 36, right: 12),
+          decoration: BoxDecoration(
+            color: selected ? T.selected : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                s.running ? Icons.circle : Icons.chat_bubble_outline_rounded,
+                size: s.running ? 9 : 17,
+                color: s.running ? const Color(0xFF32C48D) : T.textSecondary,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: T.body,
+                    color: selected ? T.brand : T.text,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
-      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
-      onTap: () => _open(s),
-      onLongPress: () => _actions(s),
     );
   }
 
@@ -466,22 +531,28 @@ class _HomePageState extends State<HomePage> {
               _expanded.add(ws.workspaceId);
             }
           }),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            child: Row(
-              children: [
-                Icon(open ? Icons.folder_open_rounded : Icons.folder_outlined, size: 17, color: Colors.black54),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(ws.title.isEmpty ? '未命名工作区' : ws.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                ),
-                Text('${items.length}', style: const TextStyle(fontSize: 11, color: Colors.black38)),
-                const SizedBox(width: 4),
-                Icon(open ? Icons.expand_less : Icons.expand_more, size: 16, color: Colors.black38),
-              ],
+          child: SizedBox(
+            height: 48,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  Icon(open ? Icons.folder_open_rounded : Icons.folder_outlined,
+                      size: 20, color: T.textSecondary),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(ws.title.isEmpty ? '未命名工作区' : ws.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: T.body, color: T.text)),
+                  ),
+                  Text('${items.length}',
+                      style: const TextStyle(fontSize: T.tiny, color: T.textTertiary)),
+                  const SizedBox(width: 6),
+                  Icon(open ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                      size: 20, color: T.textTertiary),
+                ],
+              ),
             ),
           ),
         ),
@@ -493,52 +564,62 @@ class _HomePageState extends State<HomePage> {
   Widget _drawer() {
     final ungrouped = _ungrouped;
     return Drawer(
+      backgroundColor: T.bg,
+      width: MediaQuery.of(context).size.width * 0.84,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.zero),
       child: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Padding(
-              padding: EdgeInsets.fromLTRB(18, 18, 18, 2),
+              padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
               child: Row(
                 children: [
-                  Icon(Icons.terminal_rounded, size: 22, color: Colors.black),
-                  SizedBox(width: 8),
-                  Text('DSH Harness', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  Icon(Icons.terminal_rounded, size: 24, color: T.text),
+                  SizedBox(width: 10),
+                  Text('DSH Harness',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: T.text)),
                 ],
               ),
             ),
             const Padding(
-              padding: EdgeInsets.fromLTRB(18, 10, 18, 6),
-              child: Text('工作区', style: TextStyle(fontSize: 12, color: Colors.black45)),
+              padding: EdgeInsets.fromLTRB(20, 12, 20, 4),
+              child: Text('工作区',
+                  style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
             ),
             Expanded(
               child: _loading
-                  ? const Center(child: CircularProgressIndicator())
+                  ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
                   : _error != null
-                      ? Padding(padding: const EdgeInsets.all(18), child: Text('加载失败：$_error'))
+                      ? Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Text('加载失败：$_error',
+                              style: const TextStyle(fontSize: 14, color: T.textSecondary)),
+                        )
                       : ListView(
-                          padding: EdgeInsets.zero,
+                          padding: const EdgeInsets.only(bottom: 12),
                           children: [
                             ..._workspaces.map(_workspaceRow),
                             if (ungrouped.isNotEmpty) ...[
                               const Padding(
-                                padding: EdgeInsets.fromLTRB(18, 12, 18, 4),
-                                child: Text('未分组', style: TextStyle(fontSize: 12, color: Colors.black45)),
+                                padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
+                                child: Text('未分组',
+                                    style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
                               ),
                               ...ungrouped.map(_sessionTile),
                             ],
                           ],
                         ),
             ),
-            const Divider(height: 1),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.settings_outlined, size: 18),
-              title: const Text('设置', style: TextStyle(fontSize: 14)),
+            const Divider(height: 0.8, color: T.divider),
+            TRow(
+              icon: Icons.settings_outlined,
+              label: '设置',
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
               ),
             ),
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -554,15 +635,33 @@ class _HomePageState extends State<HomePage> {
       },
       child: Scaffold(
         key: _scaffoldKey,
+        backgroundColor: T.bg,
         drawer: _drawer(),
         appBar: AppBar(
           leading: IconButton(
-            icon: const Icon(Icons.menu),
+            icon: const Icon(Icons.menu_rounded, size: 26),
             onPressed: () => _scaffoldKey.currentState?.openDrawer(),
           ),
-          title: Text(_current?.projections.title ?? '新对话',
-              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-          centerTitle: true,
+          title: Text(_current?.projections.title ?? '新对话'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.add_circle_outline_rounded, size: 24),
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                backgroundColor: T.bg,
+                shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+                builder: (context) => SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Text('新建会话需要在电脑端创建',
+                        style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
         ),
         body: _current == null
             ? const _EmptyChat()
@@ -581,13 +680,18 @@ class _EmptyChat extends StatelessWidget {
   const _EmptyChat();
   @override
   Widget build(BuildContext context) {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.bubble_chart_rounded, size: 46, color: Color(0xFFC7CEE0)),
-          SizedBox(height: 12),
-          Text('左滑打开会话列表', style: TextStyle(color: Colors.black45)),
+          Image.asset('assets/icon.png', width: 56, height: 56, errorBuilder: (_, __, ___) =>
+              const Icon(Icons.terminal_rounded, size: 52, color: T.text)),
+          const SizedBox(height: 20),
+          const Text('今天有什么可以帮到你？',
+              style: TextStyle(fontSize: T.title, fontWeight: FontWeight.w700, color: T.text)),
+          const SizedBox(height: 12),
+          const Text('左滑或点左上角，选择一个会话',
+              style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
         ],
       ),
     );
@@ -644,6 +748,7 @@ class _ChatViewState extends State<ChatView> {
   final List<_Turn> _turns = [];
   final List<String> _orphanUsers = [];
   final List<String> _orphanAnswers = [];
+  final List<ApprovalRequest> _approvals = [];
   final _input = TextEditingController();
   final _scroll = ScrollController();
   StreamSubscription<DshEvent>? _sub;
@@ -653,6 +758,15 @@ class _ChatViewState extends State<ChatView> {
   String? _pending;
   String? _error;
   String _modelLabel = '模型';
+
+  static const Set<String> _nonHumanKinds = {
+    'context',
+    'system',
+    'tool',
+    'runtime-context',
+    'runtimeContext',
+    'injected',
+  };
 
   @override
   void initState() {
@@ -700,7 +814,20 @@ class _ChatViewState extends State<ChatView> {
           return;
         }
         if (event is AssistantStreamEnded) {
-          if (!event.committed) setState(() => _turns.isNotEmpty ? _turns.last.live = '' : null);
+          if (!event.committed) {
+            setState(() {
+              if (_turns.isNotEmpty) _turns.last.live = '';
+            });
+          }
+          return;
+        }
+        if (event is ApprovalRequestedEvent) {
+          setState(() => _approvals.add(event.request));
+          _scrollToEnd(force: true);
+          return;
+        }
+        if (event is HostRequestCancelledEvent) {
+          setState(() => _approvals.removeWhere((a) => a.eventId == event.eventId));
           return;
         }
         if (event is ConnectionStateEvent) {
@@ -729,11 +856,11 @@ class _ChatViewState extends State<ChatView> {
         return;
       case 'user/message':
         final message = data['message'];
-        if (message is! Map) return;
-        final source = message['source'];
-        final kind = source is Map ? source['kind'] : null;
-        if (kind != 'user') return;
-        final text = visibleTextOf(message['content']);
+        final map = message is Map ? message : data;
+        final source = map['source'];
+        final kind = source is Map ? source['kind'] as String? : null;
+        if (kind != null && _nonHumanKinds.contains(kind)) return;
+        final text = visibleTextOf(map['content']);
         if (text.trim().isEmpty) return;
         if (_pending != null && _pending!.trim() == text.trim()) _pending = null;
         if (_turns.isEmpty) {
@@ -773,7 +900,7 @@ class _ChatViewState extends State<ChatView> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       final position = _scroll.position;
-      final nearBottom = position.pixels >= position.maxScrollExtent - 120;
+      final nearBottom = position.pixels >= position.maxScrollExtent - 140;
       if (force || nearBottom) _scroll.jumpTo(position.maxScrollExtent);
     });
   }
@@ -807,30 +934,55 @@ class _ChatViewState extends State<ChatView> {
     } catch (_) {}
   }
 
+  Future<void> _answer(ApprovalRequest request, ApprovalDecision decision) async {
+    setState(() => _approvals.removeWhere((a) => a.eventId == request.eventId));
+    try {
+      await widget.client.respondApproval(request, decision);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _approvals.add(request));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('操作失败：$error')));
+    }
+  }
+
   Future<void> _pickModel() async {
     try {
       final catalog = await widget.client.listModels();
       if (!mounted) return;
       final chosen = await showModalBottomSheet<({String provider, String model, String name})>(
         context: context,
-        isScrollControlled: true,
+        backgroundColor: T.bg,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
         builder: (context) => SafeArea(
           child: ListView(
             shrinkWrap: true,
             children: [
               for (final group in catalog.groups) ...[
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                  child: Text(group.name, style: const TextStyle(fontSize: 12, color: Colors.black45)),
+                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
+                  child: Text(group.name,
+                      style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
                 ),
                 for (final model in group.models)
-                  ListTile(
-                    dense: true,
-                    title: Text(model.name, style: const TextStyle(fontSize: 14)),
-                    trailing: model.id == _modelLabel ? const Icon(Icons.check, size: 18) : null,
-                    onTap: () => Navigator.pop(
-                      context,
-                      (provider: group.id, model: model.id, name: model.name),
+                  SizedBox(
+                    height: 52,
+                    child: InkWell(
+                      onTap: () => Navigator.pop(
+                        context,
+                        (provider: group.id, model: model.id, name: model.name),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(model.name, style: const TextStyle(fontSize: T.body)),
+                            ),
+                            if (model.id == _modelLabel)
+                              const Icon(Icons.check_rounded, size: 20, color: T.brand),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
               ],
@@ -860,18 +1012,21 @@ class _ChatViewState extends State<ChatView> {
       child: GestureDetector(
         onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
         child: Container(
-          margin: const EdgeInsets.only(left: 56, top: 6, bottom: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          margin: const EdgeInsets.only(left: 48, top: 8, bottom: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.76),
           decoration: BoxDecoration(
-            color: pending ? const Color(0xFFF0F2F5) : const Color(0xFFE8F0FE),
-            borderRadius: BorderRadius.circular(14),
+            color: pending ? const Color(0xFFF2F2F4) : T.bubble,
+            borderRadius: BorderRadius.circular(T.rBubble),
           ),
-          child: Text(text,
-              style: TextStyle(
-                fontSize: 15,
-                height: 1.5,
-                color: pending ? Colors.black45 : const Color(0xFF1A1A1A),
-              )),
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: T.body,
+              height: 1.6,
+              color: pending ? T.textSecondary : T.text,
+            ),
+          ),
         ),
       ),
     );
@@ -889,13 +1044,13 @@ class _ChatViewState extends State<ChatView> {
       label = '已完成，用时 ${_formatDuration(turn.end!.difference(turn.start))}';
     }
     return Padding(
-      padding: const EdgeInsets.only(top: 10, bottom: 4),
+      padding: const EdgeInsets.only(top: 10, bottom: 8),
       child: Row(
         children: [
-          Text(label, style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA0AA))),
+          Text(label, style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
           if (!turn.done) ...[
-            const SizedBox(width: 6),
-            const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.4)),
+            const SizedBox(width: 8),
+            const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5)),
           ],
         ],
       ),
@@ -904,7 +1059,7 @@ class _ChatViewState extends State<ChatView> {
 
   Widget _answerBlock(String text) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6, right: 6),
+      padding: const EdgeInsets.only(bottom: 4),
       child: GestureDetector(
         onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
         child: SimpleMarkdown(text),
@@ -931,19 +1086,175 @@ class _ChatViewState extends State<ChatView> {
     Widget bar(double widthFactor) => FractionallySizedBox(
           widthFactor: widthFactor,
           child: Container(
-            height: 12,
-            margin: const EdgeInsets.only(bottom: 10),
+            height: 14,
+            margin: const EdgeInsets.only(bottom: 12),
             decoration: BoxDecoration(
-              color: const Color(0xFFEDEFF3),
-              borderRadius: BorderRadius.circular(6),
+              color: const Color(0xFFF2F2F4),
+              borderRadius: BorderRadius.circular(7),
             ),
           ),
         );
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
+      padding: const EdgeInsets.fromLTRB(T.pad, 32, T.pad, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [bar(0.5), bar(0.9), bar(0.75)],
+        children: [bar(0.55), bar(0.92), bar(0.78), bar(0.4)],
+      ),
+    );
+  }
+
+  Widget _approvalPanel() {
+    final visible = _approvals.take(2).toList(growable: false);
+    final rest = _approvals.length - visible.length;
+    return Container(
+      width: double.infinity,
+      color: T.warnBg,
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final request in visible) ...[
+            Row(
+              children: [
+                const Icon(Icons.shield_outlined, size: 16, color: Color(0xFFB7791F)),
+                const SizedBox(width: 6),
+                const Text('需要你确认',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFF8A5A00))),
+                const Spacer(),
+                Text(request.toolName, style: const TextStyle(fontSize: 13, color: T.textSecondary)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              request.displayReason['zh'] ?? request.describe('zh'),
+              style: const TextStyle(fontSize: 15, height: 1.6, color: T.text),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => _answer(request, ApprovalDecision.reject),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: T.danger,
+                      side: const BorderSide(color: T.divider),
+                      minimumSize: const Size(0, 44),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                    ),
+                    child: const Text('拒绝'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => _answer(request, ApprovalDecision.allowOnce),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: T.brand,
+                      minimumSize: const Size(0, 44),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                    ),
+                    child: const Text('允许'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (rest > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text('还有 $rest 条待确认',
+                  style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _composer() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      child: Container(
+        decoration: BoxDecoration(
+          color: T.bg,
+          borderRadius: BorderRadius.circular(T.rInput),
+          border: Border.all(color: T.divider),
+          boxShadow: const [
+            BoxShadow(color: Color(0x0F000000), blurRadius: 18, offset: Offset(0, 4)),
+          ],
+        ),
+        padding: const EdgeInsets.fromLTRB(18, 6, 10, 10),
+        child: Column(
+          children: [
+            TextField(
+              controller: _input,
+              minLines: 1,
+              maxLines: 5,
+              style: const TextStyle(fontSize: T.body, height: 1.5),
+              decoration: const InputDecoration(
+                hintText: '发消息…',
+                hintStyle: TextStyle(fontSize: T.body, color: T.textTertiary),
+                border: InputBorder.none,
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(vertical: 12),
+              ),
+            ),
+            Row(
+              children: [
+                _chip(
+                  icon: Icons.tune_rounded,
+                  label: _modelLabel,
+                  onTap: _pickModel,
+                ),
+                const Spacer(),
+                if (_running)
+                  _chip(
+                    icon: Icons.stop_circle_outlined,
+                    label: '停止',
+                    onTap: _stop,
+                  ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 36,
+                  height: 36,
+                  child: FilledButton(
+                    onPressed: _sending ? null : _send,
+                    style: FilledButton.styleFrom(
+                      padding: EdgeInsets.zero,
+                      shape: const CircleBorder(),
+                      backgroundColor: T.brand,
+                    ),
+                    child: _sending
+                        ? const SizedBox(
+                            width: 16, height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.arrow_upward_rounded, size: 20, color: Colors.white),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _chip({required IconData icon, required String label, required VoidCallback onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(T.rChip),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(color: T.chipBg, borderRadius: BorderRadius.circular(T.rChip)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: T.brand),
+            const SizedBox(width: 6),
+            Text(label, style: const TextStyle(fontSize: T.tiny, color: T.brand)),
+          ],
+        ),
       ),
     );
   }
@@ -970,7 +1281,7 @@ class _ChatViewState extends State<ChatView> {
           Container(
             width: double.infinity,
             color: const Color(0xFFFFF1F0),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             child: Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFFD4380D))),
           ),
         Expanded(
@@ -978,79 +1289,12 @@ class _ChatViewState extends State<ChatView> {
               ? _skeleton()
               : ListView(
                   controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                  padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
                   children: children,
                 ),
         ),
-        SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    ActionChip(
-                      avatar: const Icon(Icons.tune, size: 14),
-                      label: Text(_modelLabel, style: const TextStyle(fontSize: 12)),
-                      onPressed: _pickModel,
-                    ),
-                    const Spacer(),
-                    if (_running)
-                      ActionChip(
-                        avatar: const Icon(Icons.stop_circle_outlined, size: 14),
-                        label: const Text('停止', style: TextStyle(fontSize: 12)),
-                        onPressed: _stop,
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(22),
-                          border: Border.all(color: const Color(0xFFE6E9EF)),
-                        ),
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        child: TextField(
-                          controller: _input,
-                          minLines: 1,
-                          maxLines: 5,
-                          decoration: const InputDecoration(
-                            hintText: '发消息…',
-                            border: InputBorder.none,
-                            isDense: true,
-                            contentPadding: EdgeInsets.symmetric(vertical: 14),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 46,
-                      height: 46,
-                      child: FilledButton(
-                        onPressed: _sending ? null : _send,
-                        style: FilledButton.styleFrom(
-                          padding: EdgeInsets.zero,
-                          shape: const CircleBorder(),
-                          backgroundColor: kBrand,
-                        ),
-                        child: _sending
-                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                            : const Icon(Icons.arrow_upward, size: 20),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
+        if (_approvals.isNotEmpty) _approvalPanel(),
+        _composer(),
       ],
     );
   }
