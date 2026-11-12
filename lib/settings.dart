@@ -25,10 +25,10 @@ class SettingsPage extends StatelessWidget {
             child: Column(
               children: [
                 TRow(
-                  icon: Icons.format_size_rounded,
-                  label: '字体大小',
+                  icon: Icons.text_fields_rounded,
+                  label: '字体',
                   onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(builder: (_) => const FontSizePage()),
+                    MaterialPageRoute<void>(builder: (_) => const FontPage()),
                   ),
                 ),
               ],
@@ -53,7 +53,7 @@ class SettingsPage extends StatelessWidget {
           ),
           const SizedBox(height: 24),
           const Center(
-            child: Text('DSH Harness',
+            child: Text('DSH R',
                 style: TextStyle(fontSize: 12, color: T.textTertiary)),
           ),
           const SizedBox(height: 4),
@@ -68,16 +68,17 @@ class SettingsPage extends StatelessWidget {
   }
 }
 
-/// 字号子页面：滑块 + 实时预览。
-class FontSizePage extends StatefulWidget {
-  const FontSizePage({super.key});
+/// 字体子页面：字号 + 粗细 + 实时预览。
+class FontPage extends StatefulWidget {
+  const FontPage({super.key});
 
   @override
-  State<FontSizePage> createState() => _FontSizePageState();
+  State<FontPage> createState() => _FontPageState();
 }
 
-class _FontSizePageState extends State<FontSizePage> {
+class _FontPageState extends State<FontPage> {
   late double _scale = kFontScale.value;
+  late double _weight = kWeight.value;
 
   @override
   Widget build(BuildContext context) {
@@ -89,7 +90,7 @@ class _FontSizePageState extends State<FontSizePage> {
           icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
           onPressed: () => Navigator.of(context).maybePop(),
         ),
-        title: const Text('字体大小'),
+        title: const Text('字体'),
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -110,19 +111,27 @@ class _FontSizePageState extends State<FontSizePage> {
                           borderRadius: BorderRadius.circular(T.rBubble),
                         ),
                         child: Text('预览文字大小',
-                            style: TextStyle(fontSize: T.body * _scale, color: T.text)),
+                            style: TextStyle(
+                              fontSize: T.body * _scale,
+                              fontWeight: weightOf(_weight),
+                              color: T.text,
+                            )),
                       ),
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      '你可以拖动滑块来调整字体大小。',
-                      style: TextStyle(fontSize: T.body * _scale, height: T.bodyH, color: T.text),
+                      '你可以拖动滑块来调整字体大小和粗细。',
+                      style: TextStyle(
+                        fontSize: T.body * _scale,
+                        height: T.bodyH,
+                        fontWeight: weightOf(_weight),
+                        color: T.text,
+                      ),
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      '当前 ${(_scale * 100).round()}%',
-                      style: TextStyle(
-                          fontSize: T.tiny * _scale, color: T.textSecondary),
+                      '当前 ${(_scale * 100).round()}% · ${_weightLabel(_weight)}',
+                      style: TextStyle(fontSize: T.tiny * _scale, color: T.textSecondary),
                     ),
                   ],
                 ),
@@ -132,18 +141,11 @@ class _FontSizePageState extends State<FontSizePage> {
           SafeArea(
             top: false,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('A', style: TextStyle(fontSize: 13, color: T.textSecondary)),
-                      Text('${(_scale * 100).round()}%',
-                          style: const TextStyle(fontSize: 13, color: T.text)),
-                      const Text('A', style: TextStyle(fontSize: 22, color: T.textSecondary)),
-                    ],
-                  ),
+                  _row('字号', '${(_scale * 100).round()}%'),
                   SliderTheme(
                     data: const SliderThemeData(
                       activeTrackColor: T.brand,
@@ -162,6 +164,26 @@ class _FontSizePageState extends State<FontSizePage> {
                       },
                     ),
                   ),
+                  const SizedBox(height: 6),
+                  _row('粗细', _weightLabel(_weight)),
+                  SliderTheme(
+                    data: const SliderThemeData(
+                      activeTrackColor: T.brand,
+                      thumbColor: T.brand,
+                      inactiveTrackColor: T.divider,
+                      trackHeight: 3,
+                    ),
+                    child: Slider(
+                      value: _weight,
+                      min: 300,
+                      max: 700,
+                      divisions: 8,
+                      onChanged: (value) {
+                        setState(() => _weight = value);
+                        kWeight.value = value;
+                      },
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -169,5 +191,23 @@ class _FontSizePageState extends State<FontSizePage> {
         ],
       ),
     );
+  }
+
+  Widget _row(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 13, color: T.textSecondary)),
+        Text(value, style: const TextStyle(fontSize: 13, color: T.text)),
+      ],
+    );
+  }
+
+  String _weightLabel(double value) {
+    if (value <= 350) return '细';
+    if (value <= 450) return '标准';
+    if (value <= 550) return '中等';
+    if (value <= 650) return '偏粗';
+    return '粗';
   }
 }

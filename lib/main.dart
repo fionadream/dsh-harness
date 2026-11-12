@@ -11,9 +11,13 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.2.28';
+const String kAppVersion = '0.2.30';
 
 void main() => runApp(const DshMiniApp());
+
+/// logo 资源缺失时的兜底图标。
+Widget _logoFallback(BuildContext context, Object error, StackTrace? stack) =>
+    const Icon(Icons.terminal_rounded, size: 24, color: T.brand);
 
 /// 全局字号缩放（设置里可调）。
 final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
@@ -23,15 +27,15 @@ class DshMiniApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<double>(
-      valueListenable: kFontScale,
-      builder: (context, scale, _) => MaterialApp(
-        title: 'DSH Harness',
+    return ListenableBuilder(
+      listenable: Listenable.merge([kFontScale, kWeight]),
+      builder: (context, _) => MaterialApp(
+        title: 'DSH R',
         debugShowCheckedModeBanner: false,
         theme: T.theme(),
         builder: (context, child) => MediaQuery.withClampedTextScaling(
-          minScaleFactor: scale,
-          maxScaleFactor: scale,
+          minScaleFactor: kFontScale.value,
+          maxScaleFactor: kFontScale.value,
           child: child ?? const SizedBox.shrink(),
         ),
         home: const GatePage(),
@@ -141,7 +145,7 @@ class _LoginPageState extends State<LoginPage> {
               Image.asset('assets/icon.png', width: 72, height: 72, errorBuilder: (_, __, ___) =>
                   const Icon(Icons.terminal_rounded, size: 64, color: T.text)),
               const SizedBox(height: 24),
-              const Text('DSH Harness',
+              const Text('DSH R',
                   style: TextStyle(fontSize: 24, fontWeight: FontWeight.w700, color: T.text)),
               const SizedBox(height: 10),
               const Text('登录后即可连接你在电脑上的 DSH',
@@ -313,11 +317,13 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   static const _collapsedKey = 'drawer.collapsed';
+  static const _readAtKey = 'sessions.readAt';
 
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
   List<Workspace> _workspaces = const [];
   Set<String> _collapsed = {};
+  final Map<String, DateTime> _readAt = {};
   SessionSummary? _current;
   bool _currentHasApproval = false;
   bool _loading = true;
@@ -328,6 +334,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _loadSessions();
     _loadDrawerState();
+    _loadReadState();
   }
 
   Future<void> _loadDrawerState() async {
@@ -342,6 +349,38 @@ class _HomePageState extends State<HomePage> {
     try {
       await SecureStore().write(_collapsedKey, _collapsed.join(','));
     } catch (_) {}
+  }
+
+  Future<void> _loadReadState() async {
+    try {
+      final raw = await SecureStore().read(_readAtKey);
+      if (!mounted || raw == null || raw.isEmpty) return;
+      final parsed = <String, DateTime>{};
+      for (final part in raw.split(';')) {
+        final index = part.indexOf('=');
+        if (index <= 0) continue;
+        final time = DateTime.tryParse(part.substring(index + 1));
+        if (time != null) parsed[part.substring(0, index)] = time;
+      }
+      setState(() => _readAt.addAll(parsed));
+    } catch (_) {}
+  }
+
+  String _encodeRead() =>
+      _readAt.entries.map((e) => '${e.key}=${e.value.toIso8601String()}').join(';');
+
+  Future<void> _markRead(String sessionId) async {
+    _readAt[sessionId] = DateTime.now();
+    try {
+      await SecureStore().write(_readAtKey, _encodeRead());
+    } catch (_) {}
+  }
+
+  /// 任务结束后、还没查看过 → 显示绿点。
+  bool _unread(SessionSummary session) {
+    final read = _readAt[session.sessionId];
+    if (read == null) return false;
+    return session.updatedAt.isAfter(read);
   }
 
   Future<void> _loadSessions() async {
@@ -382,6 +421,7 @@ class _HomePageState extends State<HomePage> {
       for (final s in sessions) {
         if (s.sessionId == _current!.sessionId) {
           setState(() => _current = s);
+          await _markRead(s.sessionId);
           return;
         }
       }
@@ -479,6 +519,8 @@ class _HomePageState extends State<HomePage> {
       _current = session;
       _currentHasApproval = false;
     });
+    _markRead(session.sessionId);
+    setState(() {});
     _scaffoldKey.currentState?.closeDrawer();
   }
 
@@ -499,7 +541,7 @@ class _HomePageState extends State<HomePage> {
     return _sessions.where((s) => !grouped.contains(s.sessionId)).toList();
   }
 
-  /// 会话前的状态指示：运行中转圈 / 待审批橙点 / 其它绿点。
+  /// 会话前的状态指示：运行中转圈 / 待审批橙点 / 未读绿点 / 已读留空。
   Widget _statusIndicator(SessionSummary s, bool selected) {
     if (s.running) {
       return const SizedBox(
@@ -508,12 +550,21 @@ class _HomePageState extends State<HomePage> {
         child: CircularProgressIndicator(strokeWidth: 1.6, color: T.textSecondary),
       );
     }
-    final color = (selected && _currentHasApproval) ? const Color(0xFFF5A623) : const Color(0xFF32C48D);
-    return Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-    );
+    if (selected && _currentHasApproval) {
+      return Container(
+        width: 8,
+        height: 8,
+        decoration: const BoxDecoration(color: T.warn, shape: BoxShape.circle),
+      );
+    }
+    if (_unread(s)) {
+      return Container(
+        width: 8,
+        height: 8,
+        decoration: const BoxDecoration(color: T.success, shape: BoxShape.circle),
+      );
+    }
+    return const SizedBox(width: 8, height: 8);
   }
 
   Widget _sessionTile(SessionSummary s) {
@@ -608,13 +659,18 @@ class _HomePageState extends State<HomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
               child: Row(
                 children: [
-                  Icon(Icons.terminal_rounded, size: 24, color: T.text),
-                  SizedBox(width: 10),
-                  Text('DSH Harness',
+                  const Image(
+                    image: AssetImage('assets/icon.png'),
+                    width: 26,
+                    height: 26,
+                    errorBuilder: _logoFallback,
+                  ),
+                  const SizedBox(width: 10),
+                  const Text('DSH R',
                       style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: T.text)),
                 ],
               ),
@@ -717,18 +773,19 @@ class _EmptyChat extends StatelessWidget {
   const _EmptyChat();
   @override
   Widget build(BuildContext context) {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Image.asset('assets/icon.png', width: 56, height: 56, errorBuilder: (_, __, ___) =>
-              const Icon(Icons.terminal_rounded, size: 52, color: T.text)),
-          const SizedBox(height: 20),
-          const Text('今天有什么可以帮到你？',
+          Image(
+            image: AssetImage('assets/icon.png'),
+            width: 56,
+            height: 56,
+            errorBuilder: _logoFallback,
+          ),
+          SizedBox(height: 20),
+          Text('今天有什么可以帮到你？',
               style: TextStyle(fontSize: T.title, fontWeight: FontWeight.w700, color: T.text)),
-          const SizedBox(height: 12),
-          const Text('左滑或点左上角，选择一个会话',
-              style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
         ],
       ),
     );

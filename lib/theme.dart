@@ -1,5 +1,14 @@
 import 'package:flutter/material.dart';
 
+/// 全局字体粗细（300–700，默认 500）。设置页可调。
+final ValueNotifier<double> kWeight = ValueNotifier<double>(500);
+
+/// 把 300–700 的数值映射到 Flutter 的 FontWeight。
+FontWeight weightOf(double value) {
+  final index = ((value - 100) / 100).round().clamp(1, 9) - 1;
+  return FontWeight.values[index];
+}
+
 /// 设计令牌：全部样式只从这里取，四个页面共用。
 class T {
   T._();
@@ -18,6 +27,8 @@ class T {
   static const chipBg = Color(0xFFEEF2FF);
   static const danger = Color(0xFFE5484D);
   static const warnBg = Color(0xFFFFFBEB);
+  static const success = Color(0xFF32C48D);
+  static const warn = Color(0xFFF5A623);
 
   // 圆角
   static const rCard = 16.0;
@@ -34,7 +45,7 @@ class T {
   static const rowH = 56.0;
   static const indentSession = 44.0;
 
-  // 字体
+  // 字号
   static const body = 17.0;
   static const bodyH = 1.75;
   static const letter = 0.2;
@@ -43,36 +54,42 @@ class T {
   static const secondary = 15.0;
   static const tiny = 13.0;
 
-  static const bodyStyle = TextStyle(
-    fontSize: body,
-    height: bodyH,
-    letterSpacing: letter,
-    color: text,
-  );
+  static TextStyle bodyStyle({Color? color}) => TextStyle(
+        fontSize: body,
+        height: bodyH,
+        letterSpacing: letter,
+        color: color ?? text,
+        fontWeight: weightOf(kWeight.value),
+      );
 
-  static const secondaryStyle = TextStyle(
-    fontSize: secondary,
-    height: 1.5,
-    color: textSecondary,
-  );
+  static TextStyle secondaryStyle() => TextStyle(
+        fontSize: secondary,
+        height: 1.5,
+        color: textSecondary,
+        fontWeight: weightOf(kWeight.value),
+      );
 
   static ThemeData theme() {
+    final w = weightOf(kWeight.value);
+    final strong = weightOf((kWeight.value + 200).clamp(300, 900));
+    final soft = weightOf((kWeight.value - 100).clamp(300, 900));
+
     return ThemeData(
       useMaterial3: true,
       brightness: Brightness.light,
       scaffoldBackgroundColor: bg,
       colorScheme: ColorScheme.fromSeed(seedColor: brand, brightness: Brightness.light),
       splashFactory: InkRipple.splashFactory,
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: bg,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: true,
-        iconTheme: IconThemeData(color: text, size: 24),
+        iconTheme: const IconThemeData(color: text, size: 24),
         titleTextStyle: TextStyle(
           fontSize: appbar,
-          fontWeight: FontWeight.w600,
+          fontWeight: strong,
           color: text,
           letterSpacing: 0,
         ),
@@ -83,10 +100,14 @@ class T {
         textColor: text,
         horizontalTitleGap: 10,
       ),
-      textTheme: const TextTheme(
-        bodyLarge: TextStyle(fontSize: body, height: bodyH, letterSpacing: letter, color: text),
-        bodyMedium: TextStyle(fontSize: secondary, height: 1.5, color: text),
-        titleLarge: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: text),
+      textTheme: TextTheme(
+        bodyLarge: TextStyle(fontSize: body, height: bodyH, letterSpacing: letter, color: text, fontWeight: w),
+        bodyMedium: TextStyle(fontSize: secondary, height: 1.5, color: text, fontWeight: w),
+        bodySmall: TextStyle(fontSize: tiny, color: textSecondary, fontWeight: w),
+        titleLarge: TextStyle(fontSize: 20, fontWeight: strong, color: text),
+        titleMedium: TextStyle(fontSize: body, fontWeight: strong, color: text),
+        labelLarge: TextStyle(fontSize: secondary, fontWeight: strong, color: text),
+        labelMedium: TextStyle(fontSize: tiny, fontWeight: soft, color: textSecondary),
       ),
       snackBarTheme: const SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
@@ -122,7 +143,7 @@ class TGroupLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-      child: Text(text, style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
+      child: Text(text, style: TextStyle(fontSize: T.secondary, color: T.textSecondary, fontWeight: weightOf(kWeight.value))),
     );
   }
 }
@@ -160,11 +181,11 @@ class TRow extends StatelessWidget {
               Icon(icon, size: 20, color: fg),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(label, style: TextStyle(fontSize: T.body, color: fg)),
+                child: Text(label, style: TextStyle(fontSize: T.body, color: fg, fontWeight: weightOf(kWeight.value))),
               ),
               if (trailing != null) ...[
                 DefaultTextStyle.merge(
-                  style: const TextStyle(fontSize: T.body, color: T.textSecondary),
+                  style: TextStyle(fontSize: T.body, color: T.textSecondary, fontWeight: weightOf(kWeight.value)),
                   child: trailing!,
                 ),
                 const SizedBox(width: 4),
