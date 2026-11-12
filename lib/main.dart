@@ -317,7 +317,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-'  Future<void> _refreshTitle() async {
+  Future<void> _refreshTitle() async {
     if (_current == null) return;
     try {
       final sessions = await widget.client.listSessions();
@@ -331,7 +331,7 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {}
   }
 
-'  SessionSummary? _find(String id) {
+  SessionSummary? _find(String id) {
     for (final s in _sessions) {
       if (s.sessionId == id) return s;
     }
