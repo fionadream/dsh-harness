@@ -30,7 +30,6 @@ class DshMiniApp extends StatelessWidget {
           brightness: Brightness.light,
           colorSchemeSeed: kBrand,
           scaffoldBackgroundColor: const Color(0xFFF7F8FA),
-          textScaler: TextScaler.linear(scale),
         ),
         builder: (context, child) => MediaQuery.withClampedTextScaling(
           minScaleFactor: scale,
@@ -688,7 +687,7 @@ class _ChatPageState extends State<ChatPage> {
                     trailing: model.id == _modelLabel ? const Icon(Icons.check, size: 18) : null,
                     onTap: () => Navigator.pop(
                       context,
-                      (provider: group.providerId, model: model.id, name: model.name),
+                      (provider: group.id, model: model.id, name: model.name),
                     ),
                   ),
               ],
