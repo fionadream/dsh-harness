@@ -580,6 +580,30 @@ class _EmptyChat extends StatelessWidget {
 
 /* ------------------------------------------------------------------ 对话 */
 
+class _Turn {
+  _Turn(this.turn, this.start);
+  final int turn;
+  final DateTime start;
+  DateTime? end;
+  String? endKind;
+  final List<String> users = [];
+  final List<String> answers = [];
+
+  bool get done => end != null;
+  bool get stopped => endKind == 'aborted' || endKind == 'interrupted';
+  bool get failed => endKind == 'error' || endKind == 'failed';
+}
+
+String _formatDuration(Duration d) {
+  final seconds = d.inMilliseconds / 1000;
+  if (seconds < 60) {
+    final rounded = (seconds * 10).round() / 10;
+    return '${rounded.toStringAsFixed(rounded == rounded.roundToDouble() ? 0 : 1)}秒';
+  }
+  final whole = seconds.round();
+  return '${whole ~/ 60}分${whole % 60}秒';
+}
+
 class ChatView extends StatefulWidget {
   const ChatView({super.key, required this.client, required this.session});
   final DshClient client;
@@ -589,20 +613,20 @@ class ChatView extends StatefulWidget {
 }
 
 class _ChatViewState extends State<ChatView> {
-  final List<SessionLogEvent> _events = [];
+  final List<_Turn> _turns = [];
+  final List<String> _orphanUsers = [];
+  final List<String> _orphanAnswers = [];
   final _input = TextEditingController();
   final _scroll = ScrollController();
   StreamSubscription<DshEvent>? _sub;
   int _lastSeq = 0;
   bool _sending = false;
-  bool _running = false;
   String? _error;
   String _modelLabel = '模型';
 
   @override
   void initState() {
     super.initState();
-    _running = widget.session.running;
     final next = widget.session.projections.nextModel;
     if (next != null) _modelLabel = next.model;
     _load();
@@ -613,13 +637,16 @@ class _ChatViewState extends State<ChatView> {
       final page = await widget.client.history(
         widget.session.sessionId,
         throughSeq: widget.session.projections.asOfSeq,
-        maxMessages: 30,
+        maxMessages: 40,
       );
       if (!mounted) return;
       setState(() {
-        _events
-          ..clear()
-          ..addAll(page.events);
+        _turns.clear();
+        _orphanUsers.clear();
+        _orphanAnswers.clear();
+        for (final event in page.events) {
+          _ingest(event);
+        }
         _lastSeq = page.events.isEmpty ? 0 : page.events.last.seq;
       });
       _scrollToEnd();
@@ -627,10 +654,8 @@ class _ChatViewState extends State<ChatView> {
         if (event is! SessionLogEvent) return;
         if (event.seq <= _lastSeq) return;
         setState(() {
-          _events.add(event);
+          _ingest(event);
           _lastSeq = event.seq;
-          if (event.type == 'turn/start') _running = true;
-          if (event.type == 'turn/end') _running = false;
         });
         _scrollToEnd();
       }, onError: (Object error) {
@@ -642,11 +667,58 @@ class _ChatViewState extends State<ChatView> {
     }
   }
 
+  void _ingest(SessionLogEvent event) {
+    final data = event.data;
+    switch (event.type) {
+      case 'turn/start':
+        final turn = data['turn'];
+        _turns.add(_Turn(turn is int ? turn : _turns.length + 1, event.time));
+        return;
+      case 'user/message':
+        final message = data['message'];
+        if (message is! Map) return;
+        final source = message['source'];
+        final kind = source is Map ? source['kind'] : null;
+        // 只显示人真正发的；context / 工具回执一律隐藏（与桌面端一致）
+        if (kind != 'user') return;
+        final text = visibleTextOf(message['content']);
+        if (text.trim().isEmpty) return;
+        if (_turns.isEmpty) {
+          _orphanUsers.add(text);
+        } else {
+          _turns.last.users.add(text);
+        }
+        return;
+      case 'assistant/message':
+        final message = data['message'];
+        if (message is! Map) return;
+        final text = visibleTextOf(message['content']);
+        if (text.trim().isEmpty) return;
+        if (_turns.isEmpty) {
+          _orphanAnswers.add(text);
+        } else {
+          _turns.last.answers.add(text);
+        }
+        return;
+      case 'turn/end':
+        if (_turns.isEmpty) return;
+        final turn = _turns.last;
+        turn.end = event.time;
+        final reason = data['reason'];
+        turn.endKind = reason is Map ? reason['kind'] as String? : null;
+        return;
+      default:
+        return;
+    }
+  }
+
   void _scrollToEnd() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
     });
   }
+
+  bool get _running => _turns.isNotEmpty && !_turns.last.done;
 
   Future<void> _send() async {
     final text = _input.text.trim();
@@ -715,65 +787,77 @@ class _ChatViewState extends State<ChatView> {
     super.dispose();
   }
 
-  Widget _bubble(SessionLogEvent event) {
-    final data = event.data;
-    final message = data['message'];
-    final content = message is Map ? message['content'] : data['content'];
-    switch (event.type) {
-      case 'user/message':
-        final text = visibleTextOf(content);
-        if (text.trim().isEmpty) return const SizedBox.shrink();
-        return Align(
-          alignment: Alignment.centerRight,
-          child: Container(
-            margin: const EdgeInsets.only(left: 56, top: 6, bottom: 6),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(14)),
-            child: Text(text, style: const TextStyle(fontSize: 15, height: 1.5, color: Color(0xFF1A1A1A))),
-          ),
-        );
-      case 'assistant/message':
-        final text = visibleTextOf(content);
-        if (text.trim().isEmpty) return const SizedBox.shrink();
-        return Padding(
-          padding: const EdgeInsets.only(top: 6, bottom: 6, right: 12),
-          child: SimpleMarkdown(text),
-        );
-      case 'tool/call':
-        final name = data['name'] ?? 'tool';
-        final args = data['arguments'] ?? '';
-        return _fold('🔧 $name', '$args');
-      case 'tool/result':
-        final result = visibleTextOf(message is Map ? message['content'] : data['content']);
-        if (result.trim().isEmpty) return const SizedBox.shrink();
-        return _fold('↩︎ 结果', result);
-      default:
-        return const SizedBox.shrink();
-    }
+  Widget _userBubble(String text) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Container(
+        margin: const EdgeInsets.only(left: 56, top: 6, bottom: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(14)),
+        child: Text(text, style: const TextStyle(fontSize: 15, height: 1.5, color: Color(0xFF1A1A1A))),
+      ),
+    );
   }
 
-  Widget _fold(String title, String body) {
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 2),
-      child: ExpansionTile(
-        tilePadding: const EdgeInsets.symmetric(horizontal: 4),
-        childrenPadding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
-        title: Text(title, style: const TextStyle(fontSize: 12.5, color: Colors.black45)),
+  Widget _statusLine(_Turn turn) {
+    final String label;
+    if (!turn.done) {
+      label = '处理中…';
+    } else if (turn.stopped) {
+      label = '已停止';
+    } else if (turn.failed) {
+      label = '处理失败';
+    } else {
+      label = '已完成，用时 ${_formatDuration(turn.end!.difference(turn.start))}';
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 10, bottom: 6),
+      child: Row(
         children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(color: const Color(0xFFF0F2F5), borderRadius: BorderRadius.circular(10)),
-            child: Text(body.length > 4000 ? body.substring(0, 4000) : body,
-                style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
-          ),
+          Text(label, style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA0AA))),
+          if (!turn.done) ...[
+            const SizedBox(width: 6),
+            const SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.4)),
+          ],
         ],
       ),
     );
   }
 
+  List<Widget> _turnWidgets(_Turn turn) {
+    final widgets = <Widget>[];
+    for (final text in turn.users) {
+      widgets.add(_userBubble(text));
+    }
+    widgets.add(_statusLine(turn));
+    for (final answer in turn.answers) {
+      widgets.add(Padding(
+        padding: const EdgeInsets.only(bottom: 8, right: 10),
+        child: SimpleMarkdown(answer),
+      ));
+    }
+    return widgets;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final children = <Widget>[];
+    for (final text in _orphanUsers) {
+      children.add(_userBubble(text));
+    }
+    if (_orphanAnswers.isNotEmpty) {
+      children.add(const SizedBox(height: 6));
+      for (final text in _orphanAnswers) {
+        children.add(Padding(
+          padding: const EdgeInsets.only(bottom: 8, right: 10),
+          child: SimpleMarkdown(text),
+        ));
+      }
+    }
+    for (final turn in _turns) {
+      children.addAll(_turnWidgets(turn));
+    }
+
     return Column(
       children: [
         if (_error != null)
@@ -785,7 +869,7 @@ class _ChatViewState extends State<ChatView> {
           child: ListView(
             controller: _scroll,
             padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-            children: _events.map(_bubble).toList(),
+            children: children,
           ),
         ),
         SafeArea(
