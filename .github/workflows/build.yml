@@ -58,6 +58,28 @@ jobs:
       - name: Pub get
         run: flutter pub get
 
+      - name: Patch plugin compileSdk
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, os
+          cache = pathlib.Path(os.path.expanduser('~/.pub-cache/hosted/pub.dev'))
+          changed = []
+          for g in list(cache.glob('*/android/build.gradle')) + list(cache.glob('*/android/build.gradle.kts')):
+              try:
+                  s = g.read_text(encoding='utf-8')
+              except OSError:
+                  continue
+              new = re.sub(r'compileSdkVersion\s+3\d', 'compileSdkVersion 36', s)
+              new = re.sub(r'compileSdk\s*=\s*3\d', 'compileSdk = 36', new)
+              new = re.sub(r'compileSdk\s+3\d', 'compileSdk 36', new)
+              if new != s:
+                  g.write_text(new, encoding='utf-8')
+                  changed.append(str(g))
+          print('patched plugin gradle files:', len(changed))
+          for c in changed:
+              print(' -', c)
+          PY
+
       - name: Launcher icons
         run: dart run flutter_launcher_icons
 
