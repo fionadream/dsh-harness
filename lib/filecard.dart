@@ -102,8 +102,11 @@ class _FileStripState extends State<FileStrip> {
 
   static String _normalize(String path) {
     var p = path.trim();
-    // 去掉末尾标点
-    p = p.replaceFirst(RegExp(r'[.,;:)\]}>"\']+$'), '');
+    // 去掉末尾标点（用循环避免正则里的引号转义问题）
+    const trailing = '.,;:)]}>"\'`';
+    while (p.isNotEmpty && trailing.contains(p[p.length - 1])) {
+      p = p.substring(0, p.length - 1);
+    }
     p = p.replaceAll('\\', '/');
     return p;
   }
