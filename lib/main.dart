@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -316,7 +317,21 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  SessionSummary? _find(String id) {
+'  Future<void> _refreshTitle() async {
+    if (_current == null) return;
+    try {
+      final sessions = await widget.client.listSessions();
+      if (!mounted || _current == null) return;
+      for (final s in sessions) {
+        if (s.sessionId == _current!.sessionId) {
+          setState(() => _current = s);
+          return;
+        }
+      }
+    } catch (_) {}
+  }
+
+'  SessionSummary? _find(String id) {
     for (final s in _sessions) {
       if (s.sessionId == id) return s;
     }
@@ -555,6 +570,7 @@ class _HomePageState extends State<HomePage> {
                 key: ValueKey(_current!.sessionId),
                 client: widget.client,
                 session: _current!,
+                onTurnEnd: _refreshTitle,
               ),
       ),
     );
@@ -588,6 +604,7 @@ class _Turn {
   String? endKind;
   final List<String> users = [];
   final List<String> answers = [];
+  String live = '';
 
   bool get done => end != null;
   bool get stopped => endKind == 'aborted' || endKind == 'interrupted';
@@ -598,16 +615,27 @@ String _formatDuration(Duration d) {
   final seconds = d.inMilliseconds / 1000;
   if (seconds < 60) {
     final rounded = (seconds * 10).round() / 10;
-    return '${rounded.toStringAsFixed(rounded == rounded.roundToDouble() ? 0 : 1)}秒';
+    final text = rounded == rounded.roundToDouble()
+        ? rounded.toStringAsFixed(0)
+        : rounded.toStringAsFixed(1);
+    return '${text}秒';
   }
   final whole = seconds.round();
   return '${whole ~/ 60}分${whole % 60}秒';
 }
 
 class ChatView extends StatefulWidget {
-  const ChatView({super.key, required this.client, required this.session});
+  const ChatView({
+    super.key,
+    required this.client,
+    required this.session,
+    this.onTurnEnd,
+  });
+
   final DshClient client;
   final SessionSummary session;
+  final Future<void> Function()? onTurnEnd;
+
   @override
   State<ChatView> createState() => _ChatViewState();
 }
@@ -620,7 +648,9 @@ class _ChatViewState extends State<ChatView> {
   final _scroll = ScrollController();
   StreamSubscription<DshEvent>? _sub;
   int _lastSeq = 0;
+  bool _loading = true;
   bool _sending = false;
+  String? _pending;
   String? _error;
   String _modelLabel = '模型';
 
@@ -641,6 +671,7 @@ class _ChatViewState extends State<ChatView> {
       );
       if (!mounted) return;
       setState(() {
+        _loading = false;
         _turns.clear();
         _orphanUsers.clear();
         _orphanAnswers.clear();
@@ -649,21 +680,42 @@ class _ChatViewState extends State<ChatView> {
         }
         _lastSeq = page.events.isEmpty ? 0 : page.events.last.seq;
       });
-      _scrollToEnd();
+      _scrollToEnd(force: true);
       _sub = widget.client.watch(widget.session.sessionId).listen((event) {
-        if (event is! SessionLogEvent) return;
-        if (event.seq <= _lastSeq) return;
-        setState(() {
-          _ingest(event);
-          _lastSeq = event.seq;
-        });
-        _scrollToEnd();
+        if (event is SessionLogEvent) {
+          if (event.seq <= _lastSeq) return;
+          setState(() {
+            _ingest(event);
+            _lastSeq = event.seq;
+          });
+          _scrollToEnd();
+          return;
+        }
+        if (event is AssistantChunkEvent) {
+          final chunk = event.chunk;
+          if (chunk is TextDeltaChunk && _turns.isNotEmpty) {
+            setState(() => _turns.last.live += chunk.text);
+            _scrollToEnd();
+          }
+          return;
+        }
+        if (event is AssistantStreamEnded) {
+          if (!event.committed) setState(() => _turns.isNotEmpty ? _turns.last.live = '' : null);
+          return;
+        }
+        if (event is ConnectionStateEvent) {
+          setState(() => _error = event.connected ? null : '连接已断开，正在重连…');
+          return;
+        }
       }, onError: (Object error) {
         if (mounted) setState(() => _error = '$error');
       });
     } catch (error) {
       if (!mounted) return;
-      setState(() => _error = '$error');
+      setState(() {
+        _loading = false;
+        _error = '$error';
+      });
     }
   }
 
@@ -679,10 +731,10 @@ class _ChatViewState extends State<ChatView> {
         if (message is! Map) return;
         final source = message['source'];
         final kind = source is Map ? source['kind'] : null;
-        // 只显示人真正发的；context / 工具回执一律隐藏（与桌面端一致）
         if (kind != 'user') return;
         final text = visibleTextOf(message['content']);
         if (text.trim().isEmpty) return;
+        if (_pending != null && _pending!.trim() == text.trim()) _pending = null;
         if (_turns.isEmpty) {
           _orphanUsers.add(text);
         } else {
@@ -698,23 +750,30 @@ class _ChatViewState extends State<ChatView> {
           _orphanAnswers.add(text);
         } else {
           _turns.last.answers.add(text);
+          _turns.last.live = '';
         }
         return;
       case 'turn/end':
         if (_turns.isEmpty) return;
         final turn = _turns.last;
         turn.end = event.time;
+        turn.live = '';
         final reason = data['reason'];
         turn.endKind = reason is Map ? reason['kind'] as String? : null;
+        final refresh = widget.onTurnEnd;
+        if (refresh != null) Future<void>.delayed(const Duration(milliseconds: 900), refresh);
         return;
       default:
         return;
     }
   }
 
-  void _scrollToEnd() {
+  void _scrollToEnd({bool force = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      if (!_scroll.hasClients) return;
+      final position = _scroll.position;
+      final nearBottom = position.pixels >= position.maxScrollExtent - 120;
+      if (force || nearBottom) _scroll.jumpTo(position.maxScrollExtent);
     });
   }
 
@@ -723,12 +782,19 @@ class _ChatViewState extends State<ChatView> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _sending) return;
-    setState(() => _sending = true);
+    setState(() {
+      _sending = true;
+      _pending = text;
+    });
+    _input.clear();
+    _scrollToEnd(force: true);
     try {
       await widget.client.prompt(widget.session.sessionId, text);
-      _input.clear();
     } catch (error) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('发送失败：$error')));
+      if (mounted) {
+        setState(() => _pending = null);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('发送失败：$error')));
+      }
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -787,14 +853,25 @@ class _ChatViewState extends State<ChatView> {
     super.dispose();
   }
 
-  Widget _userBubble(String text) {
+  Widget _userBubble(String text, {bool pending = false}) {
     return Align(
       alignment: Alignment.centerRight,
-      child: Container(
-        margin: const EdgeInsets.only(left: 56, top: 6, bottom: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(color: const Color(0xFFE8F0FE), borderRadius: BorderRadius.circular(14)),
-        child: Text(text, style: const TextStyle(fontSize: 15, height: 1.5, color: Color(0xFF1A1A1A))),
+      child: GestureDetector(
+        onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
+        child: Container(
+          margin: const EdgeInsets.only(left: 56, top: 6, bottom: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: pending ? const Color(0xFFF0F2F5) : const Color(0xFFE8F0FE),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Text(text,
+              style: TextStyle(
+                fontSize: 15,
+                height: 1.5,
+                color: pending ? Colors.black45 : const Color(0xFF1A1A1A),
+              )),
+        ),
       ),
     );
   }
@@ -811,7 +888,7 @@ class _ChatViewState extends State<ChatView> {
       label = '已完成，用时 ${_formatDuration(turn.end!.difference(turn.start))}';
     }
     return Padding(
-      padding: const EdgeInsets.only(top: 10, bottom: 6),
+      padding: const EdgeInsets.only(top: 10, bottom: 4),
       child: Row(
         children: [
           Text(label, style: const TextStyle(fontSize: 12.5, color: Color(0xFF9AA0AA))),
@@ -824,6 +901,16 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
+  Widget _answerBlock(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6, right: 6),
+      child: GestureDetector(
+        onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
+        child: SimpleMarkdown(text),
+      ),
+    );
+  }
+
   List<Widget> _turnWidgets(_Turn turn) {
     final widgets = <Widget>[];
     for (final text in turn.users) {
@@ -831,12 +918,33 @@ class _ChatViewState extends State<ChatView> {
     }
     widgets.add(_statusLine(turn));
     for (final answer in turn.answers) {
-      widgets.add(Padding(
-        padding: const EdgeInsets.only(bottom: 8, right: 10),
-        child: SimpleMarkdown(answer),
-      ));
+      widgets.add(_answerBlock(answer));
+    }
+    if (turn.live.isNotEmpty) {
+      widgets.add(_answerBlock(turn.live));
     }
     return widgets;
+  }
+
+  Widget _skeleton() {
+    Widget bar(double widthFactor) => FractionallySizedBox(
+          widthFactor: widthFactor,
+          child: Container(
+            height: 12,
+            margin: const EdgeInsets.only(bottom: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEDEFF3),
+              borderRadius: BorderRadius.circular(6),
+            ),
+          ),
+        );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [bar(0.5), bar(0.9), bar(0.75)],
+      ),
+    );
   }
 
   @override
@@ -845,32 +953,33 @@ class _ChatViewState extends State<ChatView> {
     for (final text in _orphanUsers) {
       children.add(_userBubble(text));
     }
-    if (_orphanAnswers.isNotEmpty) {
-      children.add(const SizedBox(height: 6));
-      for (final text in _orphanAnswers) {
-        children.add(Padding(
-          padding: const EdgeInsets.only(bottom: 8, right: 10),
-          child: SimpleMarkdown(text),
-        ));
-      }
+    for (final text in _orphanAnswers) {
+      children.add(_answerBlock(text));
     }
     for (final turn in _turns) {
       children.addAll(_turnWidgets(turn));
+    }
+    if (_pending != null) {
+      children.add(_userBubble(_pending!, pending: true));
     }
 
     return Column(
       children: [
         if (_error != null)
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text('错误：$_error', style: const TextStyle(color: Colors.red, fontSize: 12)),
+          Container(
+            width: double.infinity,
+            color: const Color(0xFFFFF1F0),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFFD4380D))),
           ),
         Expanded(
-          child: ListView(
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-            children: children,
-          ),
+          child: _loading
+              ? _skeleton()
+              : ListView(
+                  controller: _scroll,
+                  padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                  children: children,
+                ),
         ),
         SafeArea(
           top: false,
