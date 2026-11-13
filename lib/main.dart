@@ -19,7 +19,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.7';
+const String kAppVersion = '0.3.8';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -1177,7 +1177,7 @@ class _ChatViewState extends State<ChatView> {
           _events.insertAll(0, older);
           _rebuild();
         }
-      });
+      }, preserveTop: true);
     } catch (_) {
       if (mounted) setState(() => _loadingOlder = false);
     }
@@ -1446,29 +1446,37 @@ class _ChatViewState extends State<ChatView> {
     if (!force) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
-      // reverse:true → offset 0 就是视觉底部
-      _scroll.jumpTo(0);
+      _scroll.jumpTo(_scroll.position.maxScrollExtent);
     });
   }
 
-  /// 执行一次会改变列表高度的状态更新，并保持用户当前看到的内容不位移。
+  /// 执行一次会改变列表高度的状态更新。
   ///
-  /// reverse 列表里 offset 是"距底部的距离"：底部内容高度变化后，
-  /// 用户正在看的内容距底部也变了，必须把差值补回去，否则画面会"滑"走。
-  /// 只有用户不在底部（offset > 0）时才补偿；在底部就保持跟随。
-  void _apply(VoidCallback mutate) {
+  /// 正序列表：新内容追加在视线下方，用户往上翻阅读时**画面完全不动**，
+  /// 不需要任何补偿。只有当用户本来就贴着底部时才继续跟随。
+  ///
+  /// [preserveTop] 用于"在最上面加载更早历史"：内容插到了视线**上方**，
+  /// 需要把插入的高度补回滚动位置，否则会跳。
+  void _apply(VoidCallback mutate, {bool preserveTop = false}) {
     final hadClients = _scroll.hasClients;
-    final beforeOffset = hadClients ? _scroll.offset : 0.0;
+    final beforePixels = hadClients ? _scroll.position.pixels : 0.0;
     final beforeMax = hadClients ? _scroll.position.maxScrollExtent : 0.0;
+    final atBottom = hadClients && (beforeMax - beforePixels) <= 40;
     setState(mutate);
-    if (!hadClients || beforeOffset <= 0) return;
+    if (!hadClients) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
       final afterMax = _scroll.position.maxScrollExtent;
-      final delta = afterMax - beforeMax;
-      if (delta.abs() < 0.5) return;
-      final target = (beforeOffset + delta).clamp(0.0, afterMax);
-      if ((_scroll.offset - target).abs() > 0.5) _scroll.jumpTo(target);
+      if (preserveTop) {
+        final delta = afterMax - beforeMax;
+        if (delta.abs() < 0.5) return;
+        final target = (beforePixels + delta).clamp(0.0, afterMax);
+        if ((_scroll.offset - target).abs() > 0.5) _scroll.jumpTo(target);
+        return;
+      }
+      if (atBottom && (afterMax - _scroll.offset).abs() > 1) {
+        _scroll.jumpTo(afterMax);
+      }
     });
   }
 
@@ -2588,18 +2596,17 @@ class _ChatViewState extends State<ChatView> {
               ? _skeleton()
               : NotificationListener<ScrollNotification>(
                   onNotification: (notification) {
-                    if (notification.metrics.extentAfter < 200 && _hasMore && !_loadingOlder) {
+                    if (notification.metrics.pixels < 200 && _hasMore && !_loadingOlder) {
                       _loadOlder();
                     }
                     return false;
                   },
                   child: ListView(
                     controller: _scroll,
-                    reverse: true,
                     padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
                     children: [
-                      ...children.reversed,
                       if (_events.isNotEmpty) _olderHint(),
+                      ...children,
                     ],
                   ),
                 ),
