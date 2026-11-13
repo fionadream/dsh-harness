@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 
 import 'downloads.dart';
-import 'main.dart' show account, kAppVersion, kFontScale, kFontScaleKey, kFontWeightKey, secureStoreWrite, GatePage;
+import 'main.dart'
+    show account, kAppVersion, kFontScale, kFontScaleKey, kFontWeightKey, kLastSendStats, secureStoreWrite, GatePage;
 import 'theme.dart';
 
 class SettingsPage extends StatelessWidget {
@@ -38,6 +39,20 @@ class SettingsPage extends StatelessWidget {
                   label: '已下载文件',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(builder: (_) => const DownloadsPage()),
+                  ),
+                ),
+                const Divider(height: 0.8, color: T.divider, indent: 48),
+                // 临时诊断：看"发消息慢"到底是网络还是界面
+                ValueListenableBuilder<String>(
+                  valueListenable: kLastSendStats,
+                  builder: (context, value, _) => TRow(
+                    icon: Icons.speed_rounded,
+                    label: '上次发送',
+                    showChevron: false,
+                    trailing: Text(
+                      value.isEmpty ? '—' : value,
+                      style: const TextStyle(fontSize: T.tiny, color: T.textSecondary),
+                    ),
                   ),
                 ),
               ],
