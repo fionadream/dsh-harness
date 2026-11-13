@@ -18,7 +18,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.3';
+const String kAppVersion = '0.4.4';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -1298,6 +1298,10 @@ class _ChatViewState extends State<ChatView> {
   final List<UserQuestionRequest> _questions = [];
   final Map<String, Set<String>> _picked = {};
   Timer? _clock;
+
+  /// 「处理中… x秒」用这个 notifier 单独刷新。
+  /// 以前是每秒 setState 整个列表，长对话时每秒重排一次，容易看着看着跳。
+  final ValueNotifier<int> _clockTick = ValueNotifier<int>(0);
   final List<_Upload> _uploads = [];
   final List<PendingImage> _pendingImages = [];
   bool _uploading = false;
@@ -1362,9 +1366,9 @@ class _ChatViewState extends State<ChatView> {
     _load();
     kResumeTick.addListener(_onResumeSync);
     KeepAliveService.expired.addListener(_onKeepAliveExpired);
-    // 「处理中…」的计时刷新
+    // 「处理中…」的计时刷新（只刷文案，不重建整个列表）
     _clock = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted && _running) setState(() {});
+      if (mounted && _running) _clockTick.value += 1;
     });
   }
 
@@ -1622,8 +1626,9 @@ class _ChatViewState extends State<ChatView> {
       case 'turn/start':
         final turn = data['turn'];
         _turns.add(_Turn(turn is int ? turn : _turns.length + 1, event.time));
-        // 轮次已开始，乐观发送的灰泡不再需要
-        _pending = null;
+        // 不要在这里清 _pending：turn/start 常常比 user/message 早到十几秒，
+        // 提前清掉会让你刚发出的消息先"消失"、等回显才重新出现，同时整屏跳一下。
+        // 真正清除时机：匹配到 user/message（下面那段），或 30 秒超时兜底。
         return;
       case 'user/message':
         final message = data['message'];
@@ -1763,12 +1768,16 @@ class _ChatViewState extends State<ChatView> {
       for (final upload in uploads)
         if (upload.path != null) upload.path!,
     ];
+    // 只有本来就贴着底部的人才跟随；正在翻历史的人不动他的画面。
+    final stickToBottom = !_scroll.hasClients ||
+        (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 240;
     setState(() {
       _sending = true;
       _pending = text.isEmpty ? null : text;
     });
     _input.clear();
-    // 发完消息不跳底：保持当前位置，方便从自己这条往上/往下读。
+    // 发完这一下要让自己刚发的消息可见；之后的回复不再自动跟随。
+    if (stickToBottom) _scrollToEnd(force: true);
     try {
       final buffer = StringBuffer(text.isEmpty ? '' : text);
       if (workspacePaths.isNotEmpty) {
@@ -2148,6 +2157,8 @@ class _ChatViewState extends State<ChatView> {
   void dispose() {
     kResumeTick.removeListener(_onResumeSync);
     KeepAliveService.expired.removeListener(_onKeepAliveExpired);
+    _clock?.cancel();
+    _clockTick.dispose();
     _retryTimer?.cancel();
     _sub?.cancel();
     _input.dispose();
@@ -2158,24 +2169,29 @@ class _ChatViewState extends State<ChatView> {
   Widget _olderHint() {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 14),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (_loadingOlder) ...[
-            const SizedBox(
-              width: 13,
-              height: 13,
-              child: CircularProgressIndicator(strokeWidth: 1.6, color: T.textTertiary),
-            ),
-            const SizedBox(width: 8),
-            const Text('加载更早的消息…',
-                style: TextStyle(fontSize: T.tiny, color: T.textTertiary)),
-          ] else
-            Text(
-              _hasMore ? '上滑加载更早的消息' : '没有更多了',
-              style: const TextStyle(fontSize: T.tiny, color: T.textTertiary),
-            ),
-        ],
+      // 固定高度：加载中 / 可加载 / 没有更多 三种状态同高，
+      // 切换时不会把下面的消息顶下去。
+      child: SizedBox(
+        height: 18,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (_loadingOlder) ...[
+              const SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(strokeWidth: 1.6, color: T.textTertiary),
+              ),
+              const SizedBox(width: 8),
+              const Text('加载更早的消息…',
+                  style: TextStyle(fontSize: T.tiny, color: T.textTertiary)),
+            ] else
+              Text(
+                _hasMore ? '上滑加载更早的消息' : '没有更多了',
+                style: const TextStyle(fontSize: T.tiny, color: T.textTertiary),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -2288,27 +2304,37 @@ class _ChatViewState extends State<ChatView> {
   }
 
   Widget _statusLine(_Turn turn) {
-    final String label;
     if (!turn.done) {
-      label = '处理中… ${_shortElapsed(turn.start)}';
-    } else if (turn.stopped) {
-      label = '已停止';
-    } else if (turn.failed) {
-      label = '处理失败';
-    } else {
-      label = '已完成，用时 ${_formatDuration(turn.end!.difference(turn.start))}';
+      return Padding(
+        padding: const EdgeInsets.only(top: 10, bottom: 8),
+        child: Row(
+          children: [
+            // 计时文案单独刷新，避免每秒重建整屏
+            ValueListenableBuilder<int>(
+              valueListenable: _clockTick,
+              builder: (context, _, __) => Text(
+                '处理中… ${_shortElapsed(turn.start)}',
+                style: const TextStyle(fontSize: T.secondary, color: T.textSecondary),
+              ),
+            ),
+            const SizedBox(width: 8),
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 1.5),
+            ),
+          ],
+        ),
+      );
     }
+    final String label = turn.stopped
+        ? '已停止'
+        : turn.failed
+            ? '处理失败'
+            : '已完成，用时 ${_formatDuration(turn.end!.difference(turn.start))}';
     return Padding(
       padding: const EdgeInsets.only(top: 10, bottom: 8),
-      child: Row(
-        children: [
-          Text(label, style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
-          if (!turn.done) ...[
-            const SizedBox(width: 8),
-            const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5)),
-          ],
-        ],
-      ),
+      child: Text(label, style: const TextStyle(fontSize: T.secondary, color: T.textSecondary)),
     );
   }
 
@@ -2339,8 +2365,13 @@ class _ChatViewState extends State<ChatView> {
 
   List<Widget> _turnWidgets(_Turn turn) {
     final widgets = <Widget>[];
-    for (final msg in turn.users) {
-      widgets.add(_userBubble(msg));
+    // 每个孩子都带稳定 key：灰泡插入/消失、答案增加时，不会连锁重建
+    // 后面的 FileStrip（重建会重扫、卡片先消失后出现，整屏跟着跳）。
+    for (var i = 0; i < turn.users.length; i += 1) {
+      widgets.add(KeyedSubtree(
+        key: ValueKey<String>('u${turn.turn}-$i'),
+        child: _userBubble(turn.users[i]),
+      ));
     }
     // 乐观发送的灰泡放在本轮用户消息之后、状态行之前，避免列表末尾二次跳动
     if (_pending != null && identical(turn, _turns.isNotEmpty ? _turns.last : null)) {
@@ -2351,19 +2382,31 @@ class _ChatViewState extends State<ChatView> {
         return text.isNotEmpty && (text.contains(pendingText) || pendingText.contains(text));
       });
       if (!alreadyThere) {
-        widgets.add(_userBubble(_UserMsg(_pending!), pending: true));
+        widgets.add(KeyedSubtree(
+          key: ValueKey<String>('pending-${turn.turn}'),
+          child: _userBubble(_UserMsg(_pending!), pending: true),
+        ));
       }
     }
-    widgets.add(_statusLine(turn));
-    for (final answer in turn.answers) {
-      widgets.add(_answerBlock(answer));
+    widgets.add(KeyedSubtree(
+      key: ValueKey<String>('s${turn.turn}'),
+      child: _statusLine(turn),
+    ));
+    for (var i = 0; i < turn.answers.length; i += 1) {
+      widgets.add(KeyedSubtree(
+        key: ValueKey<String>('a${turn.turn}-$i'),
+        child: _answerBlock(turn.answers[i]),
+      ));
     }
     if (turn.delivered.isNotEmpty) {
-      widgets.add(DeliverableCard(
-        client: widget.client,
-        sessionId: widget.session.sessionId,
-        cwd: widget.session.cwd,
-        files: List<DeliveredFile>.from(turn.delivered),
+      widgets.add(KeyedSubtree(
+        key: ValueKey<String>('d${turn.turn}'),
+        child: DeliverableCard(
+          client: widget.client,
+          sessionId: widget.session.sessionId,
+          cwd: widget.session.cwd,
+          files: List<DeliveredFile>.from(turn.delivered),
+        ),
       ));
     }
     return widgets;
@@ -2810,9 +2853,8 @@ class _ChatViewState extends State<ChatView> {
 
   @override
   Widget build(BuildContext context) {
-    // 按"旧 → 新"构造，然后用 reverse:true 反转。
-    // 反向列表的视口锚在底部：新消息向下延伸、加载历史向上追加，
-    // 都不会推动当前可视内容，因此不会跳页。
+    // 正序列表：新消息追加在末尾，已有内容不会被推动。
+    // （不要在末尾再跳底，用户正在往上读。）
     final children = <Widget>[];
     for (final msg in _orphanUsers) {
       children.add(_userBubble(msg));
@@ -2848,7 +2890,17 @@ class _ChatViewState extends State<ChatView> {
               : SelectionArea(
                   child: NotificationListener<ScrollNotification>(
                     onNotification: (notification) {
-                      if (notification.metrics.pixels < 200 && _hasMore && !_loadingOlder) {
+                      // 只在"用户手指真的拖动"时才加载更早历史。
+                      // 以前只看 pixels<200，程序化 jumpTo / 计时重建都会触发，
+                      // 连锁加载并反复补偿位置 —— 就是"看着看着跳一下"的来源。
+                      final dragged = notification is ScrollUpdateNotification &&
+                          notification.dragDetails != null;
+                      final pulledTop =
+                          notification is OverscrollNotification && notification.overscroll < 0;
+                      if ((dragged || pulledTop) &&
+                          notification.metrics.pixels < 120 &&
+                          _hasMore &&
+                          !_loadingOlder) {
                         _loadOlder();
                       }
                       return false;
