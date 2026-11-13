@@ -57,6 +57,9 @@ class DownloadedItem {
 
 var _mediaStoreReady = false;
 
+/// 最近一次「静默保存」失败的原因，供 UI 提示用。
+final ValueNotifier<String?> kLastSaveError = ValueNotifier<String?>(null);
+
 Future<void> _ensureMediaStore() async {
   if (_mediaStoreReady) return;
   MediaStore.appFolder = _kInternalRoot;
@@ -64,8 +67,9 @@ Future<void> _ensureMediaStore() async {
   _mediaStoreReady = true;
 }
 
-/// 不弹框直接写入「下载/DSH R」。成功返回 content:// 地址，失败返回 null。
+/// 不弹框直接写入「下载/DSH R」。成功返回记录，失败返回 null 并记住原因。
 Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
+  kLastSaveError.value = null;
   try {
     await _ensureMediaStore();
     final dir = await getTemporaryDirectory();
@@ -75,14 +79,20 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
       tempFilePath: temp.path,
       dirType: DirType.download,
       dirName: DirName.download,
-      relativePath: kDownloadFolder,
+      relativePath: FilePath.root,
     );
     try {
       await temp.delete();
     } catch (_) {}
-    if (info == null) return null;
+    if (info == null) {
+      kLastSaveError.value = '插件未返回保存结果';
+      return null;
+    }
     final uri = info.uri.toString();
-    if (uri.isEmpty) return null;
+    if (uri.isEmpty) {
+      kLastSaveError.value = '返回地址为空';
+      return null;
+    }
     final item = DownloadedItem(
       name: info.name,
       uri: uri,
@@ -91,7 +101,8 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
     );
     await _record(item);
     return item;
-  } catch (_) {
+  } catch (error) {
+    kLastSaveError.value = '$error';
     return null;
   }
 }

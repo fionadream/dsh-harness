@@ -277,12 +277,18 @@ Future<String?> downloadWorkspaceFile(
   // 优先：静默写入「下载/DSH R」，不弹任何框。
   final saved = await saveToDownloads(name, bytes);
   if (saved != null) return '内部存储/$kDownloadFolder/${saved.name}';
+  final silentError = kLastSaveError.value;
 
   // 兜底：MediaStore 不可用时退回系统保存框，保证一定能存下来。
   if (saveDir != null && saveDir.isNotEmpty && await directoryWritable(saveDir)) {
     return writeToDirectory(saveDir, name, bytes);
   }
-  return saveViaDialog(name, bytes);
+  final fallback = await saveViaDialog(name, bytes);
+  if (silentError != null) {
+    // 让调用方能把真实原因显示出来，便于定位
+    kLastSaveError.value = silentError;
+  }
+  return fallback;
 }
 
 String sanitizeFileName(String name) {

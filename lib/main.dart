@@ -8,7 +8,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
-import 'filebrowser.dart';
 import 'deliverables.dart';
 import 'filecard.dart';
 import 'files.dart';
@@ -19,7 +18,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.0';
+const String kAppVersion = '0.4.1';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -654,6 +653,102 @@ class _HomePageState extends State<HomePage> {
     _scaffoldKey.currentState?.closeDrawer();
   }
 
+  /// 左滑触发：先选工作区，再创建新会话。
+  Future<void> _startNewSession() async {
+    final blocks = <Workspace>[..._workspaces];
+    final choice = await showModalBottomSheet<Workspace?>(
+      context: context,
+      backgroundColor: T.bg,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(8, 6, 8, 10),
+                child: Text('选择工作区，新建会话',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: T.text)),
+              ),
+              if (blocks.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('没有可用工作区', style: TextStyle(fontSize: 14, color: T.textSecondary)),
+                ),
+              for (final workspace in blocks)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => Navigator.pop(sheetContext, workspace),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                      decoration: BoxDecoration(
+                        color: T.bgGray,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.folder_outlined, size: 20, color: T.textSecondary),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  workspace.title.isEmpty ? '未命名工作区' : workspace.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 15, color: T.text),
+                                ),
+                                if (workspace.path.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Text(
+                                      workspace.path,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 11, color: T.textTertiary),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, size: 18, color: T.textTertiary),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+
+    try {
+      final created = await widget.client.createSession(workspaceId: choice.workspaceId);
+      await _loadSessions();
+      if (!mounted) return;
+      final session = _find(created.sessionId);
+      if (session != null) {
+        _open(session);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('会话已创建，下拉刷新列表可见')),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('新建会话失败：$error'), duration: const Duration(seconds: 4)),
+      );
+    }
+  }
+
   List<SessionSummary> _groupSessions(Workspace ws) {
     final out = <SessionSummary>[];
     for (final id in ws.sessionIds) {
@@ -853,7 +948,13 @@ class _HomePageState extends State<HomePage> {
     return GestureDetector(
       onHorizontalDragEnd: (details) {
         final v = details.primaryVelocity ?? 0;
-        if (v > 250) _scaffoldKey.currentState?.openDrawer();
+        if (v > 250) {
+          // 右滑：打开会话抽屉
+          _scaffoldKey.currentState?.openDrawer();
+        } else if (v < -250) {
+          // 左滑：新建会话（先选工作区）
+          _startNewSession();
+        }
       },
       child: Scaffold(
         key: _scaffoldKey,
@@ -865,45 +966,6 @@ class _HomePageState extends State<HomePage> {
             onPressed: () => _scaffoldKey.currentState?.openDrawer(),
           ),
           title: Text(_current?.projections.title ?? '新对话'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.folder_outlined, size: 22),
-              onPressed: () {
-                final session = _current;
-                if (session == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('先打开一个会话，再浏览它的工作区文件')),
-                  );
-                  return;
-                }
-                Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => FileBrowserPage(
-                      client: widget.client,
-                      sessionId: session.sessionId,
-                    ),
-                  ),
-                );
-              },
-            ),
-            IconButton(
-              icon: const Icon(Icons.add_circle_outline_rounded, size: 24),
-              onPressed: () => showModalBottomSheet<void>(
-                context: context,
-                backgroundColor: T.bg,
-                shape: const RoundedRectangleBorder(
-                    borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-                builder: (context) => const SafeArea(
-                  child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Text('新建会话需要在电脑端创建',
-                        style: TextStyle(fontSize: T.secondary, color: T.textSecondary)),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-          ],
         ),
         body: _current == null
             ? const _EmptyChat()
@@ -1434,11 +1496,18 @@ class _ChatViewState extends State<ChatView> {
     }
   }
 
-  void _scrollToEnd({bool force = false}) {
+  void _scrollToEnd({bool force = false, int attempts = 3}) {
     if (!force) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      if (!mounted || !_scroll.hasClients) return;
+      final position = _scroll.position;
+      final max = position.maxScrollExtent;
+      final gap = (position.pixels - max).abs();
+      if (gap > 4) _scroll.jumpTo(max);
+      // 列表子项异步布局会让 maxScrollExtent 变大，多补几帧确保真的贴底
+      if (attempts > 1 && gap > 4) {
+        _scrollToEnd(force: true, attempts: attempts - 1);
+      }
     });
   }
 
@@ -1453,22 +1522,17 @@ class _ChatViewState extends State<ChatView> {
     final hadClients = _scroll.hasClients;
     final beforePixels = hadClients ? _scroll.position.pixels : 0.0;
     final beforeMax = hadClients ? _scroll.position.maxScrollExtent : 0.0;
-    final atBottom = hadClients && (beforeMax - beforePixels) <= 40;
     setState(mutate);
-    if (!hadClients) return;
+    // 只有"加载更早历史"需要补偿（内容插到了视线**上方**）。
+    // 其他任何情况都不动画面：新内容长在下方，不会推动已有内容。
+    if (!hadClients || !preserveTop) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
       final afterMax = _scroll.position.maxScrollExtent;
-      if (preserveTop) {
-        final delta = afterMax - beforeMax;
-        if (delta.abs() < 0.5) return;
-        final target = (beforePixels + delta).clamp(0.0, afterMax);
-        if ((_scroll.offset - target).abs() > 0.5) _scroll.jumpTo(target);
-        return;
-      }
-      if (atBottom && (afterMax - _scroll.offset).abs() > 1) {
-        _scroll.jumpTo(afterMax);
-      }
+      final delta = afterMax - beforeMax;
+      if (delta.abs() < 0.5) return;
+      final target = (beforePixels + delta).clamp(0.0, afterMax);
+      if ((_scroll.offset - target).abs() > 0.5) _scroll.jumpTo(target);
     });
   }
 
@@ -1498,7 +1562,7 @@ class _ChatViewState extends State<ChatView> {
       _pending = text.isEmpty ? null : text;
     });
     _input.clear();
-    _scrollToEnd(force: true);
+    // 发完消息不跳底：保持当前位置，方便从自己这条往上/往下读。
     try {
       final buffer = StringBuffer(text.isEmpty ? '' : text);
       if (workspacePaths.isNotEmpty) {

@@ -42,6 +42,7 @@ jobs:
               'android.permission.FOREGROUND_SERVICE',
               'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
               'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+              'android.permission.WRITE_EXTERNAL_STORAGE',
               'android.permission.ACCESS_NETWORK_STATE',
               'android.permission.CHANGE_NETWORK_STATE',
           ]
@@ -49,6 +50,8 @@ jobs:
               if perm not in t:
                   t = t.replace('<application', '<uses-permission android:name="%s"/>\n    <application' % perm, 1)
           t = t.replace('android:label="dsh_harness"', 'android:label="DSH R"')
+          if 'requestLegacyExternalStorage' not in t:
+              t = t.replace('<application', '<application android:requestLegacyExternalStorage="true"', 1)
           svc = ('<service android:name="com.pravera.flutter_foreground_task.service.ForegroundService" '
                  'android:foregroundServiceType="dataSync" android:exported="false" />\n    </application>')
           if 'ForegroundService' not in t:
