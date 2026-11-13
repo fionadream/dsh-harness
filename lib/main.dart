@@ -18,17 +18,38 @@ import 'theme.dart';
 import 'webrtc_connector.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.4';
+const String kAppVersion = '0.3.5';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await _restorePreferences();
   KeepAliveService.init();
   // 启用 WebRTC 直连（LAN / P2P / TURN）；失败时库内自动回落中继。
   account.peerConnector = createDshPeerConnector;
   runApp(const DshMiniApp());
+}
+
+/// 字号 / 字重的存储键。
+const String kFontScaleKey = 'font.scale';
+const String kFontWeightKey = 'font.weight';
+
+/// 启动时恢复上次的字体设置。
+Future<void> _restorePreferences() async {
+  try {
+    final scale = await secureStoreRead(kFontScaleKey);
+    if (scale != null) {
+      final value = double.tryParse(scale);
+      if (value != null && value >= 0.8 && value <= 1.7) kFontScale.value = value;
+    }
+    final weight = await secureStoreRead(kFontWeightKey);
+    if (weight != null) {
+      final value = double.tryParse(weight);
+      if (value != null && value >= 300 && value <= 700) kWeight.value = value;
+    }
+  } catch (_) {}
 }
 
 /// logo 资源缺失时的兜底图标。
@@ -1003,6 +1024,9 @@ class _ChatViewState extends State<ChatView> {
   bool _loadingOlder = false;
   bool _replaying = false;
 
+  /// 是否跟随最新内容。用户往上翻时置 false，滚回底部时恢复。
+  bool _follow = true;
+
   /// 每次拉取的历史窗口大小（约 10 轮）。
   static const int _pageSize = 120;
   final List<ApprovalRequest> _approvals = [];
@@ -1180,17 +1204,18 @@ class _ChatViewState extends State<ChatView> {
     if (_resyncing) return;
     _resyncing = true;
     try {
+      // asOf 只能前进，绝不回退：服务端投影可能滞后于刚发出的事件。
       var asOf = _lastSeq;
       try {
         final sessions = await widget.client.listSessions();
         for (final s in sessions) {
           if (s.sessionId == widget.session.sessionId) {
-            asOf = s.projections.asOfSeq;
+            final server = s.projections.asOfSeq;
+            if (server > asOf) asOf = server;
             break;
           }
         }
       } catch (_) {}
-      if (asOf <= 0) asOf = _lastSeq;
       if (asOf <= 0) return;
 
       final page = await widget.client.history(
@@ -1201,11 +1226,19 @@ class _ChatViewState extends State<ChatView> {
       );
       if (!mounted) return;
       setState(() {
+        // 合并去重，而不是整体替换：
+        // 否则服务端快照滞后会把刚发出的消息抹掉，且之后的事件被 seq 过滤丢弃。
+        final merged = <int, SessionLogEvent>{
+          for (final event in _events) event.seq: event,
+          for (final event in page.events) event.seq: event,
+        };
+        final seqs = merged.keys.toList()..sort();
         _events
           ..clear()
-          ..addAll(page.events);
+          ..addAll([for (final seq in seqs) merged[seq]!]);
         _hasMore = page.hasMore;
-        _lastSeq = page.events.isEmpty ? asOf : page.events.last.seq;
+        final newest = _events.isEmpty ? asOf : _events.last.seq;
+        if (newest > _lastSeq) _lastSeq = newest;
         _error = null;
         _rebuild();
       });
@@ -1400,12 +1433,12 @@ class _ChatViewState extends State<ChatView> {
   }
 
   void _scrollToEnd({bool force = false}) {
+    if (!force && !_follow) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
-      final position = _scroll.position;
+      if (!force && !_follow) return;
       // reverse:true → offset 0 就是视觉底部
-      final nearBottom = position.pixels <= 80;
-      if (force || nearBottom) _scroll.jumpTo(0);
+      _scroll.jumpTo(0);
     });
   }
 
@@ -1433,6 +1466,7 @@ class _ChatViewState extends State<ChatView> {
     setState(() {
       _sending = true;
       _pending = text.isEmpty ? null : text;
+      _follow = true;
     });
     _input.clear();
     _scrollToEnd(force: true);
@@ -1443,12 +1477,17 @@ class _ChatViewState extends State<ChatView> {
         buffer.write(workspacePaths.join('\n'));
       }
       final body = buffer.toString().trim();
+      final started = DateTime.now();
       await widget.client.prompt(
         widget.session.sessionId,
-        body.isEmpty ? '（已发送附件）' : body,
+        body,
         images: [for (final image in images) image.toPromptImage()],
         fileReceiptIds: receiptIds,
       );
+      if (kDebugMode) {
+        final ms = DateTime.now().difference(started).inMilliseconds;
+        debugPrint('[send] prompt 耗时 ${ms}ms（图片 ${images.length} 张，文件 ${uploads.length} 个）');
+      }
       if (mounted) {
         setState(() {
           if (uploads.isNotEmpty) _uploads.clear();
@@ -1460,10 +1499,12 @@ class _ChatViewState extends State<ChatView> {
         if (mounted && _pending != null) setState(() => _pending = null);
       });
     } catch (error) {
-      if (mounted) {
-        setState(() => _pending = null);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('发送失败：$error')));
-      }
+      if (!mounted) return;
+      setState(() => _pending = null);
+      final message = isImageUnsupportedError(error) ? '该模型不支持图片' : '发送失败：$error';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+      );
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -1559,15 +1600,36 @@ class _ChatViewState extends State<ChatView> {
       // 图片：本地压缩后直接进待发送列表，不走工作区上传（秒回）
       if (imagesOnly) {
         final added = <PendingImage>[];
+        // 先把原图立刻放进待发送区（缩略图马上可见），再后台压缩替换
         for (final file in result.files) {
           final raw = file.bytes;
           if (raw == null) continue;
-          final bytes = await prepareImageForSend(raw);
-          added.add(PendingImage(bytes, file.name));
+          added.add(PendingImage(raw, file.name, compressing: raw.length > kMaxInlineImageBytes));
         }
         if (added.isEmpty || !mounted) return;
         setState(() => _pendingImages.addAll(added));
         _scrollToEnd(force: true);
+
+        for (final image in added) {
+          if (!image.compressing) continue;
+          final started = DateTime.now();
+          final original = image.bytes;
+          try {
+            final compressed = await compute(compressImageBytes, original);
+            if (kDebugMode) {
+              final ms = DateTime.now().difference(started).inMilliseconds;
+              debugPrint('[image] 压缩 ${original.length} → ${compressed.length} 字节，耗时 ${ms}ms');
+            }
+            if (!mounted) return;
+            setState(() {
+              image.bytes = compressed;
+              image.compressing = false;
+            });
+          } catch (_) {
+            if (!mounted) return;
+            setState(() => image.compressing = false);
+          }
+        }
         return;
       }
 
@@ -1649,23 +1711,7 @@ class _ChatViewState extends State<ChatView> {
   }
 
   Future<void> _toggleAutoAllow() async {
-    if (_autoAllow) {
-      setState(() => _autoAllow = false);
-      return;
-    }
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('开启自动允许？'),
-        content: const Text('本次会话内，所有审批都会自动通过，不再逐条询问。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('开启')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-    setState(() => _autoAllow = true);
+    setState(() => _autoAllow = !_autoAllow);
   }
 
   Future<void> _pickModel() async {
@@ -1907,8 +1953,24 @@ class _ChatViewState extends State<ChatView> {
                   width: 72,
                   height: 72,
                   fit: BoxFit.cover,
+                  gaplessPlayback: true,
                 ),
               ),
+              if (_pendingImages[i].compressing)
+                Positioned.fill(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0x55000000),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    alignment: Alignment.center,
+                    child: const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    ),
+                  ),
+                ),
               Positioned(
                 right: -6,
                 top: -6,
@@ -2119,8 +2181,8 @@ class _ChatViewState extends State<ChatView> {
                 label: '全部',
                 color: T.warn,
                 onTap: () async {
-                  await _toggleAutoAllow();
-                  if (!mounted || !_autoAllow) return;
+                  if (!_autoAllow) await _toggleAutoAllow();
+                  if (!mounted) return;
                   await _answer(request, ApprovalDecision.allowOnce, silent: true);
                 },
               ),
@@ -2143,78 +2205,124 @@ class _ChatViewState extends State<ChatView> {
     final picked = _picked[question.id] ?? <String>{};
     return Container(
       width: double.infinity,
-      color: const Color(0xFFF0F6FF),
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 10),
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF0F6FF),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('需要你回答',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: T.brand)),
-          const SizedBox(height: 8),
-          Text(question.question, style: const TextStyle(fontSize: 15, height: 1.6, color: T.text)),
+          Row(
+            children: [
+              Container(
+                width: 20,
+                height: 20,
+                decoration: const BoxDecoration(color: T.brand, shape: BoxShape.circle),
+                alignment: Alignment.center,
+                child: const Text('?',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white)),
+              ),
+              const SizedBox(width: 8),
+              const Text('需要你回答',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: T.brand)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(question.question, style: const TextStyle(fontSize: 15, height: 1.55, color: T.text)),
           if (question.detail != null && question.detail!.isNotEmpty) ...[
             const SizedBox(height: 4),
             Text(question.detail!,
-                style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
+                style: const TextStyle(fontSize: T.tiny, height: 1.5, color: T.textSecondary)),
           ],
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final option in question.options)
-                GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      final set = _picked.putIfAbsent(question.id, () => <String>{});
-                      if (question.multiSelect) {
-                        if (!set.remove(option.label)) set.add(option.label);
-                      } else {
-                        set
-                          ..clear()
-                          ..add(option.label);
-                      }
+          const SizedBox(height: 12),
+          for (final option in question.options)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _questionOption(
+                label: option.label,
+                selected: picked.contains(option.label),
+                onTap: () {
+                  setState(() {
+                    final set = _picked.putIfAbsent(question.id, () => <String>{});
+                    if (question.multiSelect) {
+                      if (!set.remove(option.label)) set.add(option.label);
+                    } else {
+                      set
+                        ..clear()
+                        ..add(option.label);
+                    }
+                  });
+                  if (!question.multiSelect) {
+                    // 先让选中态显示出来，再提交
+                    Future<void>.delayed(const Duration(milliseconds: 160), () {
+                      if (mounted) _submitQuestion(request);
                     });
-                    if (!question.multiSelect) _submitQuestion(request);
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: picked.contains(option.label) ? T.brand : T.bg,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: picked.contains(option.label) ? T.brand : T.divider),
-                    ),
-                    child: Text(
-                      option.label,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: picked.contains(option.label) ? Colors.white : T.text,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          if (question.multiSelect) ...[
-            const SizedBox(height: 10),
-            Align(
-              alignment: Alignment.centerRight,
-              child: FilledButton(
-                onPressed: picked.isEmpty ? null : () => _submitQuestion(request),
-                style: FilledButton.styleFrom(
-                  backgroundColor: T.brand,
-                  minimumSize: const Size(0, 38),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(19)),
-                ),
-                child: const Text('提交'),
+                  }
+                },
               ),
             ),
-          ],
+          if (question.multiSelect)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: FilledButton(
+                  onPressed: picked.isEmpty ? null : () => _submitQuestion(request),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: T.brand,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+                  ),
+                  child: const Text('提交'),
+                ),
+              ),
+            ),
         ],
       ),
     );
   }
 
+  /// 提问选项：整行卡片，选中时浅蓝底 + 蓝边 + 对勾。
+  Widget _questionOption({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 48),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFE3ECFF) : T.bg,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? T.brand : T.divider,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 14,
+                  height: 1.45,
+                  color: selected ? T.brand : T.text,
+                  fontWeight: selected ? FontWeight.w600 : null,
+                ),
+              ),
+            ),
+            if (selected) const Icon(Icons.check_rounded, size: 18, color: T.brand),
+          ],
+        ),
+      ),
+    );
+  }
   Widget _composer() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
@@ -2317,6 +2425,8 @@ class _ChatViewState extends State<ChatView> {
                 ),
                 const SizedBox(width: 8),
                 _chip(label: shortModelName(_modelLabel), onTap: _pickModel),
+                const SizedBox(width: 8),
+                _autoAllowButton(),
                 const Spacer(),
                 if (_running)
                   Padding(
@@ -2332,22 +2442,6 @@ class _ChatViewState extends State<ChatView> {
                           backgroundColor: const Color(0xFF6B6B70),
                         ),
                         child: const Icon(Icons.stop_rounded, size: 20, color: Colors.white),
-                      ),
-                    ),
-                  ),
-                if (_autoAllow)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: GestureDetector(
-                      onTap: _toggleAutoAllow,
-                      child: Container(
-                        width: 36,
-                        height: 36,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFFF5A623),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(Icons.bolt_rounded, size: 20, color: Colors.white),
                       ),
                     ),
                   ),
@@ -2371,6 +2465,29 @@ class _ChatViewState extends State<ChatView> {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 常驻的「本次会话全部允许」开关：关＝蓝，开＝绿。
+  Widget _autoAllowButton() {
+    const onColor = Color(0xFF32C48D);
+    final color = _autoAllow ? onColor : T.brand;
+    return GestureDetector(
+      onTap: _toggleAutoAllow,
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: _autoAllow ? color : Colors.transparent,
+          shape: BoxShape.circle,
+          border: Border.all(color: color, width: 1.4),
+        ),
+        child: Icon(
+          Icons.bolt_rounded,
+          size: 18,
+          color: _autoAllow ? Colors.white : color,
         ),
       ),
     );
@@ -2436,7 +2553,12 @@ class _ChatViewState extends State<ChatView> {
               ? _skeleton()
               : NotificationListener<ScrollNotification>(
                   onNotification: (notification) {
-                    // reverse:true 时，extentAfter 才是"距离视觉顶部"的距离
+                    // reverse:true 时 offset 0 是底部；离底 40px 内视为跟随
+                    final pixels = notification.metrics.pixels;
+                    final follow = pixels <= 40;
+                    if (follow != _follow) {
+                      setState(() => _follow = follow);
+                    }
                     if (notification.metrics.extentAfter < 200 && _hasMore && !_loadingOlder) {
                       _loadOlder();
                     }

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import 'main.dart' show account, kAppVersion, kFontScale, GatePage;
+import 'main.dart' show account, kAppVersion, kFontScale, kFontScaleKey, kFontWeightKey, secureStoreWrite, GatePage;
 import 'theme.dart';
 
 class SettingsPage extends StatelessWidget {
@@ -162,6 +162,7 @@ class _FontPageState extends State<FontPage> {
                         setState(() => _scale = value);
                         kFontScale.value = value;
                       },
+                      onChangeEnd: (value) => secureStoreWrite(kFontScaleKey, value.toString()),
                     ),
                   ),
                   const SizedBox(height: 6),
@@ -182,6 +183,7 @@ class _FontPageState extends State<FontPage> {
                         setState(() => _weight = value);
                         kWeight.value = value;
                       },
+                      onChangeEnd: (value) => secureStoreWrite(kFontWeightKey, value.toString()),
                     ),
                   ),
                 ],

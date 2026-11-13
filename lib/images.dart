@@ -8,12 +8,13 @@ import 'package:image/image.dart' as img;
 import 'package:dsh_remote/dsh_remote.dart';
 import 'theme.dart';
 
-/// 单张待发送图片（本地字节，已在压缩后）。
+/// 单张待发送图片：先原样入列（立刻显示），后台压缩后回填。
 class PendingImage {
-  PendingImage(this.bytes, this.name);
+  PendingImage(this.bytes, this.name, {this.compressing = false});
 
-  final Uint8List bytes;
+  Uint8List bytes;
   final String name;
+  bool compressing;
 
   String get mediaType => 'image/jpeg';
 
@@ -24,13 +25,13 @@ class PendingImage {
       );
 }
 
-/// 超过这个大小才压缩；手机截图通常几百 KB，不会触发。
-const int kMaxInlineImageBytes = 1400 * 1024;
+/// 超过这个大小才压缩；小图（截图、缩略图）直接原样发送，零等待。
+const int kMaxInlineImageBytes = 4 * 1024 * 1024;
 
 const int _kMaxSide = 1600;
 const int _kJpegQuality = 85;
 
-/// 同步压缩（会占用 CPU，调用方应放到 isolate）。
+/// 同步压缩（会占用 CPU，调用方放到 isolate）。
 Uint8List compressImageBytes(Uint8List input) {
   final decoded = img.decodeImage(input);
   if (decoded == null) return input;
@@ -42,12 +43,6 @@ Uint8List compressImageBytes(Uint8List input) {
   }
   final encoded = img.encodeJpg(out, quality: _kJpegQuality);
   return Uint8List.fromList(encoded);
-}
-
-/// 准备好要发送的图片字节：小图原样返回，大图压缩。
-Future<Uint8List> prepareImageForSend(Uint8List bytes) async {
-  if (bytes.length <= kMaxInlineImageBytes) return bytes;
-  return compute(compressImageBytes, bytes);
 }
 
 /// 会话里的图片缓存：attachmentId → 字节。
@@ -119,7 +114,7 @@ class _AttachmentImageState extends State<AttachmentImage> {
     final bytes = _bytes;
     if (bytes == null) {
       return _placeholder(
-        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+        const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6)),
       );
     }
     return ClipRRect(
@@ -145,4 +140,11 @@ List<ImageAttachment> imagePartsOf(Object? content) {
     if (ref.attachmentId.isNotEmpty) out.add(ref);
   }
   return out;
+}
+
+/// 判断服务端是否因为「模型不支持图片」而拒绝。
+bool isImageUnsupportedError(Object error) {
+  final text = error.toString();
+  return text.contains('does not support image input') ||
+      text.contains('attachment-invalid');
 }
