@@ -1233,7 +1233,8 @@ class _Upload {
 
 /// 一条用户消息：文字 + 可选图片。
 class _UserMsg {
-  _UserMsg(this.text, [this.images = const []], {this.echoPending = false});
+  /// [echoPending] 用作第三个位置参数（Dart 不允许同时出现可选位置参数与命名参数）。
+  _UserMsg(this.text, [this.images = const [], this.echoPending = false]);
 
   final String text;
   final List<ImageAttachment> images;
@@ -1825,7 +1826,7 @@ class _ChatViewState extends State<ChatView> {
         if (upload.path != null) upload.path!,
     ];
     // 发送瞬间就按正式消息显示，不等服务器回显（回显常常要十几秒）。
-    final localMsg = text.isEmpty ? null : _UserMsg(text, const [], echoPending: true);
+    final localMsg = text.isEmpty ? null : _UserMsg(text, const [], true);
     setState(() {
       _sending = true;
       if (localMsg != null) _outgoing.add(localMsg);
