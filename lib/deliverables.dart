@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
+import 'downloads.dart';
 import 'files.dart';
 import 'theme.dart';
 
@@ -97,6 +98,7 @@ class _DeliverableCardState extends State<DeliverableCard> {
         },
       );
       if (!mounted) return;
+      final reason = kLastSaveError.value;
       setState(() {
         if (saved == null) {
           _progress.remove(index);
@@ -105,6 +107,14 @@ class _DeliverableCardState extends State<DeliverableCard> {
           _savedPath[index] = saved;
         }
       });
+      if (saved == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(reason == null ? '保存失败' : '保存失败：$reason'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
