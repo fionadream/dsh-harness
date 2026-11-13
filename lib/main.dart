@@ -18,7 +18,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.1';
+const String kAppVersion = '0.4.2';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -361,53 +361,31 @@ class _HostsPageState extends State<HostsPage> {
               child: Text('没有在线的电脑', style: TextStyle(color: T.textSecondary, fontSize: 15)),
             );
           }
-          return ListView.separated(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-            itemCount: hosts.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 10),
-            itemBuilder: (context, index) {
-              final host = hosts[index];
-              final busy = _connecting == host.id;
-              return Container(
-                decoration: BoxDecoration(
-                  color: T.bg,
-                  borderRadius: BorderRadius.circular(T.rCard),
-                  border: Border.all(color: T.divider),
-                ),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(T.rCard),
-                  onTap: host.online && !busy ? () => _connect(host) : null,
-                  child: SizedBox(
-                    height: 64,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          Icon(Icons.computer_rounded,
-                              size: 22, color: host.online ? T.brand : T.textTertiary),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(host.name,
-                                    style: const TextStyle(fontSize: T.body, color: T.text)),
-                                const SizedBox(height: 2),
-                                Text(host.online ? '在线' : '离线',
-                                    style: const TextStyle(fontSize: T.tiny, color: T.textSecondary)),
-                              ],
+          // 单列居中、等距；只有一台电脑时也落在画面中间。
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              return SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: (constraints.maxHeight - 48).clamp(0.0, double.infinity),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      for (final host in hosts)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 20),
+                          child: Center(
+                            child: _HostTile(
+                              name: host.name,
+                              online: host.online,
+                              busy: _connecting == host.id,
+                              onTap: () => _connect(host),
                             ),
                           ),
-                          if (busy)
-                            const SizedBox(
-                                width: 18, height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2))
-                          else
-                            const Icon(Icons.chevron_right, size: 20, color: T.textTertiary),
-                        ],
-                      ),
-                    ),
+                        ),
+                    ],
                   ),
                 ),
               );
@@ -417,6 +395,158 @@ class _HostsPageState extends State<HostsPage> {
       ),
     );
   }
+}
+
+/* -------------------------------------------------------------- 显示器件 */
+
+/// 主机卡片：显示器外框（CustomPaint）+ 中间圆形应用图标 + 下方主机名。
+/// 在线：图标全彩、线框浅灰、可点；离线：整项灰度压暗、不可点。
+class _HostTile extends StatelessWidget {
+  const _HostTile({
+    required this.name,
+    required this.online,
+    required this.busy,
+    required this.onTap,
+  });
+
+  final String name;
+  final bool online;
+  final bool busy;
+  final VoidCallback onTap;
+
+  /// 显示器外框尺寸（与截图比例一致）。
+  static const double _w = 120;
+  static const double _h = 114;
+  static const double _icon = 52;
+
+  @override
+  Widget build(BuildContext context) {
+    final line = online ? const Color(0xFFD5D8DE) : T.textTertiary;
+
+    Widget icon = ClipOval(
+      child: Image.asset(
+        'assets/icon.png',
+        width: _icon,
+        height: _icon,
+        fit: BoxFit.cover,
+        errorBuilder: _logoFallback,
+      ),
+    );
+    if (!online) {
+      icon = ColorFiltered(
+        colorFilter: const ColorFilter.matrix(<double>[
+          0.2126, 0.7152, 0.0722, 0, 0, //
+          0.2126, 0.7152, 0.0722, 0, 0, //
+          0.2126, 0.7152, 0.0722, 0, 0, //
+          0, 0, 0, 1, 0, //
+        ]),
+        child: icon,
+      );
+    }
+
+    Widget tile = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: _w,
+          height: _h,
+          child: Stack(
+            children: [
+              Positioned.fill(child: CustomPaint(painter: _HostScreenPainter(line))),
+              Positioned(
+                left: (_w - _icon) / 2,
+                top: 22,
+                width: _icon,
+                height: _icon,
+                child: icon,
+              ),
+              if (busy)
+                Positioned(
+                  left: (_w - _icon) / 2 + _icon - 17,
+                  top: 22 + _icon - 17,
+                  child: Container(
+                    width: 17,
+                    height: 17,
+                    padding: const EdgeInsets.all(2.5),
+                    decoration: const BoxDecoration(color: T.bg, shape: BoxShape.circle),
+                    child: const CircularProgressIndicator(strokeWidth: 1.6),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        Text(
+          name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: online ? T.text : T.textTertiary,
+          ),
+        ),
+      ],
+    );
+
+    if (!online) tile = Opacity(opacity: 0.55, child: tile);
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: online && !busy ? onTap : null,
+      child: Semantics(
+        button: online,
+        label: '$name，${online ? '在线' : '离线'}',
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          child: tile,
+        ),
+      ),
+    );
+  }
+}
+
+/// 画显示器线框 + 竖颈 + 底座。
+class _HostScreenPainter extends CustomPainter {
+  const _HostScreenPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final stroke = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2
+      ..isAntiAlias = true;
+    final fill = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
+    // 外框：左右各留 0.6 让线落在像素中心
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(0.6, 0.6, w - 1.2, 94.8),
+        const Radius.circular(10),
+      ),
+      stroke,
+    );
+    // 竖颈
+    canvas.drawRect(Rect.fromLTWH(w / 2 - 7, 95.4, 14, 15), fill);
+    // 底座
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(w / 2 - 24, 110.4, 48, 3.2),
+        const Radius.circular(2),
+      ),
+      fill,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_HostScreenPainter oldDelegate) => oldDelegate.color != color;
 }
 
 /* ------------------------------------------------------------------ 主页 */
@@ -961,10 +1091,9 @@ class _HomePageState extends State<HomePage> {
         backgroundColor: T.bg,
         drawer: _drawer(),
         appBar: AppBar(
-          leading: IconButton(
-            icon: const Icon(Icons.menu_rounded, size: 26),
-            onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-          ),
+          // 去掉左上角 ☰：抽屉只靠右滑打开。
+          // 必须关掉 automaticallyImplyLeading，否则 AppBar 检测到有 drawer 会自动塞回 DrawerButton。
+          automaticallyImplyLeading: false,
           title: Text(_current?.projections.title ?? '新对话'),
         ),
         body: _current == null
