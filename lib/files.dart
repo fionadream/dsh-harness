@@ -1,10 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
 import 'downloads.dart';
@@ -83,77 +81,7 @@ Future<UploadOutcome> uploadToSession(
   return UploadOutcome.workspace(uploaded.path, picked.name);
 }
 
-/* ------------------------------------------------------------ 保存目录 */
-
-/// 选择保存目录；返回路径或 null（取消）。
-Future<String?> pickSaveDirectory() async {
-  return FilePicker.platform.getDirectoryPath(dialogTitle: '选择文件保存目录');
-}
-
-/// 目录是否可写。
-Future<bool> directoryWritable(String? dir) async {
-  if (dir == null || dir.isEmpty) return false;
-  try {
-    final probe = File('$dir${Platform.pathSeparator}.dsh_write_test');
-    await probe.writeAsString('ok', flush: true);
-    await probe.delete();
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-/// 把字节写到 [dir]／[name]；成功返回落地路径，失败抛异常。
-Future<String> writeToDirectory(String dir, String name, Uint8List bytes) async {
-  final target = File('$dir${Platform.pathSeparator}$name');
-  await target.writeAsBytes(bytes, flush: true);
-  return target.path;
-}
-
-/// 兜底：走系统「保存到」对话框（不需要任何存储权限）。
-/// 成功返回路径；用户取消返回 null。
-Future<String?> saveViaDialog(String name, Uint8List bytes) async {
-  return FilePicker.platform.saveFile(
-    dialogTitle: '保存到…',
-    fileName: name,
-    bytes: bytes,
-  );
-}
-
 /* -------------------------------------------------------------- 下载 */
-
-class WorkspaceEntry {
-  WorkspaceEntry(this.name, this.isDirectory);
-  final String name;
-  final bool isDirectory;
-
-  static WorkspaceEntry? fromJson(Object? json) {
-    if (json is! Map) return null;
-    final name = json['name'];
-    if (name is! String || name.isEmpty) return null;
-    final type = json['type'];
-    return WorkspaceEntry(name, type == 'directory');
-  }
-}
-
-/// 列出工作区目录（path 为空字符串表示根目录）。
-Future<List<WorkspaceEntry>> listWorkspaceDirectory(
-  DshClient client,
-  String sessionId,
-  String path,
-) async {
-  final value = await client.rpc.call('workspaceFiles/list', {
-    'workspaceFileScopeId': sessionId,
-    'path': path,
-  });
-  final map = value is Map ? value : const {};
-  final entries = map['entries'];
-  if (entries is! List) return const [];
-  return [
-    for (final item in entries)
-      if (WorkspaceEntry.fromJson(item) case final entry?) entry,
-  ];
-}
 
 class DownloadProgress {
   DownloadProgress(this.received, this.total);
@@ -251,14 +179,15 @@ Uint8List _bytesOf(Object? data) {
   return Uint8List(0);
 }
 
-/// 下载到已配置目录；目录不可用时回退到系统保存对话框。
-/// 返回落地路径，取消返回 null。
+/// 下载到「内部存储/下载/DSH R」。
+///
+/// 只走静默保存，**不再弹系统保存框**（用户 2026-11-13 明确要求）。
+/// 返回落地位置；失败返回 null，真实原因在 [kLastSaveError] 里。
 Future<String?> downloadWorkspaceFile(
   DshClient client,
   String sessionId,
   String path, {
   required String fileName,
-  String? saveDir,
   void Function(DownloadProgress)? onProgress,
   bool Function()? isCancelled,
 }) async {
@@ -273,22 +202,9 @@ Future<String?> downloadWorkspaceFile(
   );
   final bytes = builder.takeBytes();
   final name = sanitizeFileName(fileName);
-
-  // 优先：静默写入「下载/DSH R」，不弹任何框。
   final saved = await saveToDownloads(name, bytes);
-  if (saved != null) return '内部存储/$kDownloadFolder/${saved.name}';
-  final silentError = kLastSaveError.value;
-
-  // 兜底：MediaStore 不可用时退回系统保存框，保证一定能存下来。
-  if (saveDir != null && saveDir.isNotEmpty && await directoryWritable(saveDir)) {
-    return writeToDirectory(saveDir, name, bytes);
-  }
-  final fallback = await saveViaDialog(name, bytes);
-  if (silentError != null) {
-    // 让调用方能把真实原因显示出来，便于定位
-    kLastSaveError.value = silentError;
-  }
-  return fallback;
+  if (saved == null) return null;
+  return '内部存储/$kDownloadFolder/${saved.name}';
 }
 
 String sanitizeFileName(String name) {
@@ -301,8 +217,4 @@ String fileNameOf(String path) {
   final normalized = path.replaceAll('\\', '/');
   final index = normalized.lastIndexOf('/');
   return index < 0 ? normalized : normalized.substring(index + 1);
-}
-
-void logFileOp(String message) {
-  if (kDebugMode) debugPrint('[files] $message');
 }
