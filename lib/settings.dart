@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'downloads.dart';
 import 'main.dart' show account, kAppVersion, kFontScale, kFontScaleKey, kFontWeightKey, secureStoreWrite, GatePage;
 import 'theme.dart';
 
@@ -29,6 +30,14 @@ class SettingsPage extends StatelessWidget {
                   label: '字体',
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(builder: (_) => const FontPage()),
+                  ),
+                ),
+                const Divider(height: 0.8, color: T.divider, indent: 48),
+                TRow(
+                  icon: Icons.download_rounded,
+                  label: '已下载文件',
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(builder: (_) => const DownloadsPage()),
                   ),
                 ),
               ],

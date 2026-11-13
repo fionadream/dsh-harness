@@ -19,7 +19,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.8';
+const String kAppVersion = '0.4.0';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -1258,7 +1258,7 @@ class _ChatViewState extends State<ChatView> {
     _sub = widget.client
         .watch(
           widget.session.sessionId,
-          options: const WatchOptions(includeSyncEvents: true),
+          options: const WatchOptions(includeSyncEvents: true, assistantStream: false),
         )
         .listen((event) {
         if (event is SessionLogEvent) {
@@ -1271,18 +1271,10 @@ class _ChatViewState extends State<ChatView> {
           return;
         }
         if (event is AssistantChunkEvent) {
-          final chunk = event.chunk;
-          if (chunk is TextDeltaChunk && _turns.isNotEmpty) {
-            _apply(() => _turns.last.live += chunk.text);
-          }
+          // 流式已关闭（assistantStream: false），正常不会收到；留一行防御。
           return;
         }
         if (event is AssistantStreamEnded) {
-          if (!event.committed) {
-            _apply(() {
-              if (_turns.isNotEmpty) _turns.last.live = '';
-            });
-          }
           return;
         }
         if (event is ApprovalRequestedEvent) {
@@ -1922,9 +1914,7 @@ class _ChatViewState extends State<ChatView> {
     final text = msg.text;
     return Align(
       alignment: Alignment.centerRight,
-      child: GestureDetector(
-        onLongPress: text.isEmpty ? null : () => Clipboard.setData(ClipboardData(text: text)),
-        child: Container(
+      child: Container(
           margin: const EdgeInsets.only(left: 48, top: 8, bottom: 8),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.76),
@@ -1967,7 +1957,6 @@ class _ChatViewState extends State<ChatView> {
             ],
           ),
         ),
-      ),
     );
   }
 
@@ -2066,10 +2055,7 @@ class _ChatViewState extends State<ChatView> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          GestureDetector(
-            onLongPress: () => Clipboard.setData(ClipboardData(text: text)),
-            child: SimpleMarkdown(text),
-          ),
+          SimpleMarkdown(text),
           FileStrip(
             client: widget.client,
             sessionId: widget.session.sessionId,
@@ -2101,9 +2087,6 @@ class _ChatViewState extends State<ChatView> {
     widgets.add(_statusLine(turn));
     for (final answer in turn.answers) {
       widgets.add(_answerBlock(answer));
-    }
-    if (turn.live.isNotEmpty) {
-      widgets.add(_answerBlock(turn.live));
     }
     if (turn.delivered.isNotEmpty) {
       widgets.add(DeliverableCard(
@@ -2471,44 +2454,42 @@ class _ChatViewState extends State<ChatView> {
                 const SizedBox(width: 8),
                 _autoAllowButton(),
                 const Spacer(),
-                if (_running)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: SizedBox(
-                      width: 36,
-                      height: 36,
-                      child: FilledButton(
-                        onPressed: _stop,
-                        style: FilledButton.styleFrom(
-                          padding: EdgeInsets.zero,
-                          shape: const CircleBorder(),
-                          backgroundColor: const Color(0xFF6B6B70),
-                        ),
-                        child: const Icon(Icons.stop_rounded, size: 20, color: Colors.white),
-                      ),
-                    ),
-                  ),
-                SizedBox(
-                  width: 36,
-                  height: 36,
-                  child: FilledButton(
-                    onPressed: _sending ? null : _send,
-                    style: FilledButton.styleFrom(
-                      padding: EdgeInsets.zero,
-                      shape: const CircleBorder(),
-                      backgroundColor: T.brand,
-                    ),
-                    child: _sending
-                        ? const SizedBox(
-                            width: 16, height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : const Icon(Icons.arrow_upward_rounded, size: 20, color: Colors.white),
-                  ),
-                ),
+                _primaryButton(),
               ],
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 发送 / 停止 合并成一个按钮：
+  /// 空闲＝蓝色发送箭头；运行中＝灰色停止方块；发送请求在途＝转圈。
+  Widget _primaryButton() {
+    final running = _running;
+    final busy = _sending && !running;
+    const background = T.brand;
+    return SizedBox(
+      width: 36,
+      height: 36,
+      child: FilledButton(
+        onPressed: busy ? null : (running ? _stop : _send),
+        style: FilledButton.styleFrom(
+          padding: EdgeInsets.zero,
+          shape: const CircleBorder(),
+          backgroundColor: background,
+        ),
+        child: busy
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              )
+            : Icon(
+                running ? Icons.stop_rounded : Icons.arrow_upward_rounded,
+                size: 20,
+                color: Colors.white,
+              ),
       ),
     );
   }
@@ -2594,20 +2575,22 @@ class _ChatViewState extends State<ChatView> {
         Expanded(
           child: _loading
               ? _skeleton()
-              : NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification.metrics.pixels < 200 && _hasMore && !_loadingOlder) {
-                      _loadOlder();
-                    }
-                    return false;
-                  },
-                  child: ListView(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
-                    children: [
-                      if (_events.isNotEmpty) _olderHint(),
-                      ...children,
-                    ],
+              : SelectionArea(
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      if (notification.metrics.pixels < 200 && _hasMore && !_loadingOlder) {
+                        _loadOlder();
+                      }
+                      return false;
+                    },
+                    child: ListView(
+                      controller: _scroll,
+                      padding: const EdgeInsets.fromLTRB(T.pad, 8, T.pad, 16),
+                      children: [
+                        if (_events.isNotEmpty) _olderHint(),
+                        ...children,
+                      ],
+                    ),
                   ),
                 ),
         ),

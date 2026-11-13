@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
+import 'downloads.dart';
 
 /// 上传上限：Host 内联回退路由的上限是 30 MiB。
 const int kMaxUploadBytes = 30 * 1024 * 1024;
@@ -273,6 +274,11 @@ Future<String?> downloadWorkspaceFile(
   final bytes = builder.takeBytes();
   final name = sanitizeFileName(fileName);
 
+  // 优先：静默写入「下载/DSH R」，不弹任何框。
+  final saved = await saveToDownloads(name, bytes);
+  if (saved != null) return '内部存储/$kDownloadFolder/${saved.name}';
+
+  // 兜底：MediaStore 不可用时退回系统保存框，保证一定能存下来。
   if (saveDir != null && saveDir.isNotEmpty && await directoryWritable(saveDir)) {
     return writeToDirectory(saveDir, name, bytes);
   }
