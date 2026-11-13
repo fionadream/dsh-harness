@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
 import 'filebrowser.dart';
+import 'deliverables.dart';
 import 'filecard.dart';
 import 'files.dart';
 import 'images.dart';
@@ -16,10 +17,9 @@ import 'keepalive.dart';
 import 'markdown.dart';
 import 'settings.dart';
 import 'theme.dart';
-import 'webrtc_connector.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.5';
+const String kAppVersion = '0.3.6';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -28,8 +28,6 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _restorePreferences();
   KeepAliveService.init();
-  // 启用 WebRTC 直连（LAN / P2P / TURN）；失败时库内自动回落中继。
-  account.peerConnector = createDshPeerConnector;
   runApp(const DshMiniApp());
 }
 
@@ -977,6 +975,7 @@ class _Turn {
   String? endKind;
   final List<_UserMsg> users = [];
   final List<String> answers = [];
+  final List<DeliveredFile> delivered = [];
   String live = '';
 
   bool get done => end != null;
@@ -1024,9 +1023,6 @@ class _ChatViewState extends State<ChatView> {
   bool _hasMore = false;
   bool _loadingOlder = false;
   bool _replaying = false;
-
-  /// 是否跟随最新内容。用户往上翻时置 false，滚回底部时恢复。
-  bool _follow = true;
 
   /// 每次拉取的历史窗口大小（约 10 轮）。
   static const int _pageSize = 120;
@@ -1273,14 +1269,12 @@ class _ChatViewState extends State<ChatView> {
             _ingest(event);
             _lastSeq = event.seq;
           });
-          _scrollToEnd();
           return;
         }
         if (event is AssistantChunkEvent) {
           final chunk = event.chunk;
           if (chunk is TextDeltaChunk && _turns.isNotEmpty) {
             setState(() => _turns.last.live += chunk.text);
-            _scrollToEnd();
           }
           return;
         }
@@ -1303,7 +1297,6 @@ class _ChatViewState extends State<ChatView> {
             }
           });
           widget.onApprovalPending?.call(true);
-          _scrollToEnd(force: true);
           return;
         }
         if (event is HostRequestCancelledEvent) {
@@ -1362,7 +1355,6 @@ class _ChatViewState extends State<ChatView> {
       _approvals.add(request);
       });
     widget.onApprovalPending?.call(true);
-    _scrollToEnd(force: true);
   }
 
   void _ingest(SessionLogEvent event) {
@@ -1416,6 +1408,24 @@ class _ChatViewState extends State<ChatView> {
           _turns.last.live = '';
         }
         return;
+      case 'deliverables/presented':
+        final files = DeliveredFile.fromEventData(data);
+        if (files.isEmpty) return;
+        final turnNumber = data['turn'];
+        _Turn? owner;
+        for (final candidate in _turns) {
+          if (turnNumber is int && candidate.turn == turnNumber) {
+            owner = candidate;
+            break;
+          }
+        }
+        owner ??= _turns.isNotEmpty ? _turns.last : null;
+        if (owner == null) return;
+        for (final file in files) {
+          final exists = owner.delivered.any((f) => f.path == file.path);
+          if (!exists) owner.delivered.add(file);
+        }
+        return;
       case 'turn/end':
         if (_turns.isEmpty) return;
         final turn = _turns.last;
@@ -1434,10 +1444,9 @@ class _ChatViewState extends State<ChatView> {
   }
 
   void _scrollToEnd({bool force = false}) {
-    if (!force && !_follow) return;
+    if (!force) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
-      if (!force && !_follow) return;
       // reverse:true → offset 0 就是视觉底部
       _scroll.jumpTo(0);
     });
@@ -1467,7 +1476,6 @@ class _ChatViewState extends State<ChatView> {
     setState(() {
       _sending = true;
       _pending = text.isEmpty ? null : text;
-      _follow = true;
     });
     _input.clear();
     _scrollToEnd(force: true);
@@ -1609,7 +1617,6 @@ class _ChatViewState extends State<ChatView> {
         }
         if (added.isEmpty || !mounted) return;
         setState(() => _pendingImages.addAll(added));
-        _scrollToEnd(force: true);
 
         for (final image in added) {
           if (!image.compressing) continue;
@@ -1649,7 +1656,6 @@ class _ChatViewState extends State<ChatView> {
         _uploads.add(placeholder);
         _uploading = true;
       });
-      _scrollToEnd(force: true);
       final picked = PickedUpload(file.name, bytes);
       try {
         final outcome = await uploadToSession(widget.client, widget.session.sessionId, picked);
@@ -2070,6 +2076,14 @@ class _ChatViewState extends State<ChatView> {
     }
     if (turn.live.isNotEmpty) {
       widgets.add(_answerBlock(turn.live));
+    }
+    if (turn.delivered.isNotEmpty) {
+      widgets.add(DeliverableCard(
+        client: widget.client,
+        sessionId: widget.session.sessionId,
+        cwd: widget.session.cwd,
+        files: List<DeliveredFile>.from(turn.delivered),
+      ));
     }
     return widgets;
   }
@@ -2554,12 +2568,6 @@ class _ChatViewState extends State<ChatView> {
               ? _skeleton()
               : NotificationListener<ScrollNotification>(
                   onNotification: (notification) {
-                    // reverse:true 时 offset 0 是底部；离底 40px 内视为跟随
-                    final pixels = notification.metrics.pixels;
-                    final follow = pixels <= 40;
-                    if (follow != _follow) {
-                      setState(() => _follow = follow);
-                    }
                     if (notification.metrics.extentAfter < 200 && _hasMore && !_loadingOlder) {
                       _loadOlder();
                     }

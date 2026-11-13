@@ -11,8 +11,9 @@ import 'package:dsh_remote/dsh_remote.dart';
 /// 上传上限：Host 内联回退路由的上限是 30 MiB。
 const int kMaxUploadBytes = 30 * 1024 * 1024;
 
-/// 下载分块大小（Host 单窗口上限 2 MiB，这里取 512 KiB 稳妥些）。
-const int kReadWindowBytes = 512 * 1024;
+/// 下载分块：先试 2 MiB（协议上限），失败自动退回 512 KiB。
+const int kReadWindowBytesFast = 2 * 1024 * 1024;
+const int kReadWindowBytesSafe = 512 * 1024;
 
 /// 单个下载文件上限（协议允许 100 MiB）。
 const int kMaxDownloadBytes = 100 * 1024 * 1024;
@@ -168,6 +169,9 @@ class DownloadCancelled implements Exception {
 
 /// 从 Host 的工作区分块读取一个文件，边读边喂给 [onChunk]。
 /// 返回字节数。通过 [isCancelled] 可以中途取消。
+///
+/// 块大小自适应：默认试 [kReadWindowBytesFast]，失败（帧过大/超时）就降到
+/// [kReadWindowBytesSafe] 重试同一段，之后整个文件都用小块，不会中断。
 Future<int> readWorkspaceFile(
   DshClient client,
   String sessionId,
@@ -179,17 +183,30 @@ Future<int> readWorkspaceFile(
   var offset = 0;
   String? expectedVersion;
   int? total;
+  var window = kReadWindowBytesFast;
+  var downgraded = false;
 
   while (true) {
     if (isCancelled?.call() ?? false) throw const DownloadCancelled();
 
-    final value = await client.rpc.call('workspaceFiles/readBytes', {
-      'workspaceFileScopeId': sessionId,
-      'path': path,
-      'options': {
-        'range': {'offset': offset, 'length': kReadWindowBytes},
-      },
-    });
+    Object? value;
+    try {
+      value = await client.rpc.call('workspaceFiles/readBytes', {
+        'workspaceFileScopeId': sessionId,
+        'path': path,
+        'options': {
+          'range': {'offset': offset, 'length': window},
+        },
+      });
+    } catch (error) {
+      // 首次用大块失败：退回小块重试同一段，绝不中断下载。
+      if (!downgraded && window > kReadWindowBytesSafe) {
+        downgraded = true;
+        window = kReadWindowBytesSafe;
+        continue;
+      }
+      rethrow;
+    }
     if (value is! Map) throw Exception('读取失败：返回格式异常');
 
     final version = value['version'];
