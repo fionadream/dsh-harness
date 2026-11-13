@@ -80,6 +80,7 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
     try {
       await temp.delete();
     } catch (_) {}
+    if (info == null) return null;
     final uri = info.uri.toString();
     if (uri.isEmpty) return null;
     final item = DownloadedItem(
