@@ -18,7 +18,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.2';
+const String kAppVersion = '0.4.3';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -399,8 +399,9 @@ class _HostsPageState extends State<HostsPage> {
 
 /* -------------------------------------------------------------- 显示器件 */
 
-/// 主机卡片：显示器外框（CustomPaint）+ 中间圆形应用图标 + 下方主机名。
-/// 在线：图标全彩、线框浅灰、可点；离线：整项灰度压暗、不可点。
+/// 主机卡片：线稿显示器（外框 + 屏幕分割线 + 外扩支架 + 底座），
+/// 屏幕里是「应用图标方块 + 主机名」。照参考图比例 1.568:1 复刻。
+/// 在线：彩色、可点；离线：整项灰度压暗、不可点。
 class _HostTile extends StatelessWidget {
   const _HostTile({
     required this.name,
@@ -414,139 +415,215 @@ class _HostTile extends StatelessWidget {
   final bool busy;
   final VoidCallback onTap;
 
-  /// 显示器外框尺寸（与截图比例一致）。
-  static const double _w = 120;
-  static const double _h = 114;
-  static const double _icon = 52;
+  /// 显示器尺寸（上一版 120×96，这版整体放大到 184×117）。
+  static const double screenW = 184;
+  static const double screenH = 117;
+  static const double standH = 25;
+
+  /// 屏幕里的应用图标方块。
+  static const double _iconBox = 45;
+
+  /// 屏幕下边框（bezel）上沿的 y；图标和名字都排在它上面。
+  static const double _bezelY = 100;
 
   @override
   Widget build(BuildContext context) {
-    final line = online ? const Color(0xFFD5D8DE) : T.textTertiary;
+    final line = online ? const Color(0xFFC6C6C8) : T.textTertiary;
 
-    Widget icon = ClipOval(
-      child: Image.asset(
-        'assets/icon.png',
-        width: _icon,
-        height: _icon,
-        fit: BoxFit.cover,
-        errorBuilder: _logoFallback,
+    Widget content = SizedBox(
+      width: screenW,
+      height: screenH + standH,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _MonitorPainter(color: line, screenW: screenW, screenH: screenH),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            height: _bezelY - 3,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  _iconTile(busy: busy),
+                  const SizedBox(height: 6),
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 21,
+                      height: 1.1,
+                      letterSpacing: 0.2,
+                      fontWeight: FontWeight.w700,
+                      color: online ? T.text : T.textTertiary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
+
     if (!online) {
-      icon = ColorFiltered(
-        colorFilter: const ColorFilter.matrix(<double>[
-          0.2126, 0.7152, 0.0722, 0, 0, //
-          0.2126, 0.7152, 0.0722, 0, 0, //
-          0.2126, 0.7152, 0.0722, 0, 0, //
-          0, 0, 0, 1, 0, //
-        ]),
-        child: icon,
+      content = Opacity(
+        opacity: 0.55,
+        child: ColorFiltered(
+          colorFilter: const ColorFilter.matrix(<double>[
+            0.2126, 0.7152, 0.0722, 0, 0, //
+            0.2126, 0.7152, 0.0722, 0, 0, //
+            0.2126, 0.7152, 0.0722, 0, 0, //
+            0, 0, 0, 1, 0, //
+          ]),
+          child: content,
+        ),
       );
     }
 
-    Widget tile = Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: _w,
-          height: _h,
-          child: Stack(
-            children: [
-              Positioned.fill(child: CustomPaint(painter: _HostScreenPainter(line))),
-              Positioned(
-                left: (_w - _icon) / 2,
-                top: 22,
-                width: _icon,
-                height: _icon,
-                child: icon,
+    return Semantics(
+      button: online,
+      label: '$name，${online ? '在线' : '离线'}',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: online && !busy ? onTap : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
+          child: content,
+        ),
+      ),
+    );
+  }
+
+  /// 应用图标：白色圆角方块 + 略微放大的鲸鱼；连接中盖一层转圈。
+  Widget _iconTile({required bool busy}) {
+    final radius = BorderRadius.circular(_iconBox * 0.24);
+    return SizedBox(
+      width: _iconBox,
+      height: _iconBox,
+      child: Stack(
+        children: [
+          Container(
+            width: _iconBox,
+            height: _iconBox,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: radius,
+              boxShadow: const [
+                BoxShadow(color: Color(0x0F000000), blurRadius: 8, offset: Offset(0, 2)),
+              ],
+            ),
+            // 放大后裁掉四周留白，让鲸鱼占满方块（照参考图的图标占比）
+            child: OverflowBox(
+              minWidth: _iconBox * 1.32,
+              maxWidth: _iconBox * 1.32,
+              minHeight: _iconBox * 1.32,
+              maxHeight: _iconBox * 1.32,
+              child: Image.asset(
+                'assets/icon.png',
+                width: _iconBox * 1.32,
+                height: _iconBox * 1.32,
+                fit: BoxFit.cover,
+                errorBuilder: _logoFallback,
               ),
-              if (busy)
-                Positioned(
-                  left: (_w - _icon) / 2 + _icon - 17,
-                  top: 22 + _icon - 17,
-                  child: Container(
-                    width: 17,
-                    height: 17,
-                    padding: const EdgeInsets.all(2.5),
-                    decoration: const BoxDecoration(color: T.bg, shape: BoxShape.circle),
-                    child: const CircularProgressIndicator(strokeWidth: 1.6),
+            ),
+          ),
+          if (busy)
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xB3FFFFFF),
+                  borderRadius: radius,
+                ),
+                child: const Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                 ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        Text(
-          name,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-            color: online ? T.text : T.textTertiary,
-          ),
-        ),
-      ],
-    );
-
-    if (!online) tile = Opacity(opacity: 0.55, child: tile);
-
-    return InkWell(
-      borderRadius: BorderRadius.circular(20),
-      onTap: online && !busy ? onTap : null,
-      child: Semantics(
-        button: online,
-        label: '$name，${online ? '在线' : '离线'}',
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
-          child: tile,
-        ),
+              ),
+            ),
+        ],
       ),
     );
   }
 }
 
-/// 画显示器线框 + 竖颈 + 底座。
-class _HostScreenPainter extends CustomPainter {
-  const _HostScreenPainter(this.color);
+/// 线稿显示器：圆角外框 + 屏幕分割线 + 两只外扩支架 + 底座。
+/// 全部用描边画（上一版的实心灰块就是"丑"的来源）。
+class _MonitorPainter extends CustomPainter {
+  const _MonitorPainter({
+    required this.color,
+    required this.screenW,
+    required this.screenH,
+  });
 
   final Color color;
+  final double screenW;
+  final double screenH;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final w = size.width;
+    final w = screenW;
+    final h = screenH;
     final stroke = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2
-      ..isAntiAlias = true;
-    final fill = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill
+      ..strokeWidth = 1.3
+      ..strokeCap = StrokeCap.round
       ..isAntiAlias = true;
 
-    // 外框：左右各留 0.6 让线落在像素中心
+    // 外框
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        Rect.fromLTWH(0.6, 0.6, w - 1.2, 94.8),
-        const Radius.circular(10),
+        Rect.fromLTWH(0.65, 0.65, w - 1.3, h - 1.3),
+        const Radius.circular(5),
       ),
       stroke,
     );
-    // 竖颈
-    canvas.drawRect(Rect.fromLTWH(w / 2 - 7, 95.4, 14, 15), fill);
-    // 底座
+
+    // 屏幕与下边框之间的那条线
+    final bezelY = h * 0.855;
+    canvas.drawLine(Offset(0.65, bezelY), Offset(w - 0.65, bezelY), stroke);
+
+    // 支架：两条竖线 → 外扩圆角 → 底座横条
+    final centerX = w / 2;
+    final legDx = w * 0.088;
+    final baseTop = h + w * 0.11;
+    final baseHalf = w * 0.201;
+
+    for (final sign in const <double>[-1, 1]) {
+      final x = centerX + sign * legDx;
+      final path = Path()
+        ..moveTo(x, h - 0.65)
+        ..lineTo(x, baseTop - w * 0.035)
+        ..quadraticBezierTo(x, baseTop, centerX + sign * baseHalf, baseTop);
+      canvas.drawPath(path, stroke);
+    }
+
     canvas.drawRRect(
       RRect.fromRectAndRadius(
-        Rect.fromLTWH(w / 2 - 24, 110.4, 48, 3.2),
-        const Radius.circular(2),
+        Rect.fromLTWH(centerX - baseHalf, baseTop, baseHalf * 2, 3.4),
+        const Radius.circular(1.7),
       ),
-      fill,
+      stroke,
     );
   }
 
   @override
-  bool shouldRepaint(_HostScreenPainter oldDelegate) => oldDelegate.color != color;
+  bool shouldRepaint(_MonitorPainter oldDelegate) =>
+      oldDelegate.color != color ||
+      oldDelegate.screenW != screenW ||
+      oldDelegate.screenH != screenH;
 }
 
 /* ------------------------------------------------------------------ 主页 */
