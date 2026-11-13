@@ -18,7 +18,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.4';
+const String kAppVersion = '0.4.5';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -84,6 +84,9 @@ final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
 
 /// 当前连接的电脑名（保活通知里显示）。
 final ValueNotifier<String?> kLastDevice = ValueNotifier<String?>(null);
+
+/// 最近一次发送的耗时（设置页显示，用于判断"消息慢"是网络还是渲染）。
+final ValueNotifier<String> kLastSendStats = ValueNotifier<String>('');
 
 class DshMiniApp extends StatefulWidget {
   const DshMiniApp({super.key});
@@ -1230,9 +1233,17 @@ class _Upload {
 
 /// 一条用户消息：文字 + 可选图片。
 class _UserMsg {
-  _UserMsg(this.text, [this.images = const []]);
+  _UserMsg(this.text, [this.images = const []], {this.echoPending = false});
+
   final String text;
   final List<ImageAttachment> images;
+
+  /// 本地先显示、还没等到服务器回显（回显到达后置 false）。
+  /// 发送瞬间就按正式消息渲染，用户不用等十几秒才看到自己那句话。
+  bool echoPending;
+
+  /// 发送失败（气泡标红）。
+  bool failed = false;
 }
 
 class _Turn {
@@ -1316,7 +1327,10 @@ class _ChatViewState extends State<ChatView> {
   bool _loading = true;
   bool _sending = false;
   bool _autoAllow = false;
-  String? _pending;
+
+  /// 本地已发出、还没等到服务器回显的消息。
+  /// 渲染在列表末尾，回显到达后并进对应轮次（不会出现两条）。
+  final List<_UserMsg> _outgoing = [];
   String? _error;
   String _modelLabel = '模型';
 
@@ -1422,9 +1436,21 @@ class _ChatViewState extends State<ChatView> {
       _ingest(event);
     }
     _replaying = false;
-    // 注意：这里绝不能恢复 _pending。
-    // _ingest 重放历史时，turn/start 会把 _pending 清空；若此处再写回旧值，
-    // 灰色的"发送中"气泡就会复活，和真实消息并排显示两条一模一样的。
+    // 重放历史后，如果本地那条已经在历史里了，就去掉本地副本，避免两条。
+    if (_outgoing.isNotEmpty) {
+      bool inHistory(String value) {
+        final target = value.trim();
+        if (target.isEmpty) return true;
+        bool hit(_UserMsg msg) {
+          final text = msg.text.trim();
+          return text.isNotEmpty && (text.contains(target) || target.contains(text));
+        }
+
+        return _turns.any((turn) => turn.users.any(hit)) || _orphanUsers.any(hit);
+      }
+
+      _outgoing.removeWhere((msg) => inHistory(msg.text));
+    }
     _oldestSeq = _events.isEmpty ? 0 : _events.first.seq;
   }
 
@@ -1624,11 +1650,14 @@ class _ChatViewState extends State<ChatView> {
     final data = event.data;
     switch (event.type) {
       case 'turn/start':
-        final turn = data['turn'];
-        _turns.add(_Turn(turn is int ? turn : _turns.length + 1, event.time));
-        // 不要在这里清 _pending：turn/start 常常比 user/message 早到十几秒，
-        // 提前清掉会让你刚发出的消息先"消失"、等回显才重新出现，同时整屏跳一下。
-        // 真正清除时机：匹配到 user/message（下面那段），或 30 秒超时兜底。
+        final number = data['turn'];
+        final started = _Turn(number is int ? number : _turns.length + 1, event.time);
+        _turns.add(started);
+        // 本地刚发出、还没回显的消息先挂进这一轮，保证位置正确。
+        // 重放历史时绝对不能搬：否则本地消息会被塞到历史开头。
+        if (!_replaying && _outgoing.isNotEmpty) {
+          started.users.add(_outgoing.removeAt(0));
+        }
         return;
       case 'user/message':
         final message = data['message'];
@@ -1648,11 +1677,8 @@ class _ChatViewState extends State<ChatView> {
           if (_contextPrefixes.any(head.startsWith)) return;
           if (_isMetaNotice(text)) return;
         }
-        if (_pending != null && text.trim().isNotEmpty) {
-          final pending = _pending!.trim();
-          final incoming = text.trim();
-          if (incoming.contains(pending) || pending.contains(incoming)) _pending = null;
-        }
+        // 本地已经先渲染过这条 → 就地"转正"，不再添加第二条
+        if (_absorbEcho(text)) return;
         final userMsg = _UserMsg(text, images);
         if (_turns.isEmpty) {
           _orphanUsers.add(userMsg);
@@ -1705,6 +1731,36 @@ class _ChatViewState extends State<ChatView> {
       default:
         return;
     }
+  }
+
+  /// 服务器回显到达：把本地那条同文本的乐观消息"转正"。
+  /// 返回 true 表示已由本地那条代表，调用方不要再添加第二条。
+  bool _absorbEcho(String text) {
+    final incoming = text.trim();
+    if (incoming.isEmpty) return false;
+
+    bool matches(String other) {
+      final target = other.trim();
+      if (target.isEmpty) return false;
+      return incoming.contains(target) || target.contains(incoming);
+    }
+
+    for (final turn in _turns) {
+      for (final msg in turn.users) {
+        if (!msg.echoPending || !matches(msg.text)) continue;
+        msg.echoPending = false;
+        kLastSendStats.value = '${kLastSendStats.value} · 回显已到';
+        return true;
+      }
+    }
+    for (final msg in _orphanUsers) {
+      if (!msg.echoPending || !matches(msg.text)) continue;
+      msg.echoPending = false;
+      return true;
+    }
+    // 还没挂进轮次：丢掉本地那条，让真实消息自己进列表
+    _outgoing.removeWhere((msg) => matches(msg.text));
+    return false;
   }
 
   void _scrollToEnd({bool force = false, int attempts = 3}) {
@@ -1768,16 +1824,15 @@ class _ChatViewState extends State<ChatView> {
       for (final upload in uploads)
         if (upload.path != null) upload.path!,
     ];
-    // 只有本来就贴着底部的人才跟随；正在翻历史的人不动他的画面。
-    final stickToBottom = !_scroll.hasClients ||
-        (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 240;
+    // 发送瞬间就按正式消息显示，不等服务器回显（回显常常要十几秒）。
+    final localMsg = text.isEmpty ? null : _UserMsg(text, const [], echoPending: true);
     setState(() {
       _sending = true;
-      _pending = text.isEmpty ? null : text;
+      if (localMsg != null) _outgoing.add(localMsg);
     });
     _input.clear();
-    // 发完这一下要让自己刚发的消息可见；之后的回复不再自动跟随。
-    if (stickToBottom) _scrollToEnd(force: true);
+    // 自己发的东西必须立刻可见：无条件跳到底。
+    _scrollToEnd(force: true);
     try {
       final buffer = StringBuffer(text.isEmpty ? '' : text);
       if (workspacePaths.isNotEmpty) {
@@ -1802,13 +1857,14 @@ class _ChatViewState extends State<ChatView> {
           if (images.isNotEmpty) _pendingImages.clear();
         });
       }
-      // 兜底：30 秒内没等到真实消息，也把灰泡清掉
-      Future<void>.delayed(const Duration(seconds: 30), () {
-        if (mounted && _pending != null) setState(() => _pending = null);
-      });
+      kLastSendStats.value =
+          '发出耗时 ${DateTime.now().difference(started).inMilliseconds}ms';
     } catch (error) {
       if (!mounted) return;
-      setState(() => _pending = null);
+      setState(() {
+        localMsg?.failed = true;
+        localMsg?.echoPending = false;
+      });
       final message = isImageUnsupportedError(error) ? '该模型不支持图片' : '发送失败：$error';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
@@ -2196,7 +2252,7 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
-  Widget _userBubble(_UserMsg msg, {bool pending = false}) {
+  Widget _userBubble(_UserMsg msg) {
     final text = msg.text;
     return Align(
       alignment: Alignment.centerRight,
@@ -2205,8 +2261,9 @@ class _ChatViewState extends State<ChatView> {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.76),
           decoration: BoxDecoration(
-            color: pending ? const Color(0xFFF2F2F4) : T.bubble,
+            color: msg.failed ? const Color(0xFFFFE9E8) : T.bubble,
             borderRadius: BorderRadius.circular(T.rBubble),
+            border: msg.failed ? Border.all(color: const Color(0xFFFFC9C5)) : null,
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
@@ -2237,7 +2294,7 @@ class _ChatViewState extends State<ChatView> {
                   style: TextStyle(
                     fontSize: T.body,
                     height: 1.6,
-                    color: pending ? T.textSecondary : T.text,
+                    color: msg.failed ? T.danger : T.text,
                   ),
                 ),
             ],
@@ -2372,21 +2429,6 @@ class _ChatViewState extends State<ChatView> {
         key: ValueKey<String>('u${turn.turn}-$i'),
         child: _userBubble(turn.users[i]),
       ));
-    }
-    // 乐观发送的灰泡放在本轮用户消息之后、状态行之前，避免列表末尾二次跳动
-    if (_pending != null && identical(turn, _turns.isNotEmpty ? _turns.last : null)) {
-      // 兜底去重：本轮已有同文本的用户消息时，不再画灰泡
-      final pendingText = _pending!.trim();
-      final alreadyThere = turn.users.any((u) {
-        final text = u.text.trim();
-        return text.isNotEmpty && (text.contains(pendingText) || pendingText.contains(text));
-      });
-      if (!alreadyThere) {
-        widgets.add(KeyedSubtree(
-          key: ValueKey<String>('pending-${turn.turn}'),
-          child: _userBubble(_UserMsg(_pending!), pending: true),
-        ));
-      }
     }
     widgets.add(KeyedSubtree(
       key: ValueKey<String>('s${turn.turn}'),
@@ -2871,8 +2913,12 @@ class _ChatViewState extends State<ChatView> {
         ),
       ));
     }
-    if (_pending != null && _turns.isEmpty) {
-      children.add(_userBubble(_UserMsg(_pending!), pending: true));
+    // 本地刚发出、还没回显的消息：永远排在最后，保证"发出去就能看见"
+    for (var i = 0; i < _outgoing.length; i += 1) {
+      children.add(KeyedSubtree(
+        key: ValueKey<String>('out-$i'),
+        child: _userBubble(_outgoing[i]),
+      ));
     }
 
     return Column(
