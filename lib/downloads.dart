@@ -16,7 +16,25 @@ const String kDownloadIndexKey = 'downloads.index';
 /// MediaStore 里的子目录名。
 const String kDownloadFolder = 'DSH R';
 
-const String _kInternalRoot = 'DSH R';
+/// 「下载」根目录的几种写法，不同 ROM 不一样，挨个试。
+const List<String> _downloadRoots = <String>[
+  '/storage/emulated/0/Download',
+  '/sdcard/Download',
+];
+
+/// 候选目录：先 `下载/DSH R`，再 `下载` 本身（插件万一没建子目录）。
+List<String> _candidateDirs() => <String>[
+      for (final root in _downloadRoots) '$root/$kDownloadFolder',
+      for (final root in _downloadRoots) root,
+    ];
+
+/// 核实到的落地文件。
+class _Landed {
+  const _Landed(this.path, this.name, this.bytes);
+  final String path;
+  final String name;
+  final int bytes;
+}
 
 /// 一条已下载记录。
 class DownloadedItem {
@@ -62,18 +80,27 @@ final ValueNotifier<String?> kLastSaveError = ValueNotifier<String?>(null);
 
 Future<void> _ensureMediaStore() async {
   if (_mediaStoreReady) return;
-  MediaStore.appFolder = _kInternalRoot;
+  MediaStore.appFolder = kDownloadFolder;
   await MediaStore.ensureInitialized();
   _mediaStoreReady = true;
 }
 
-/// 不弹框直接写入「下载/DSH R」。成功返回记录，失败返回 null 并记住原因。
+/// 不弹框直接写入「下载/DSH R」。
+///
+/// **不再相信 `MediaStore().saveFile()` 的返回值**：实测它经常写完文件后
+/// 抛异常或返回 null，导致上层误判失败、又弹一次系统保存框、索引也写不进去。
+/// 现在以磁盘为准——文件真的在、字节数对，就算成功。
 Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
   kLastSaveError.value = null;
+  final started = DateTime.now();
+  String? pluginError;
+  DownloadedItem? pluginItem;
+
+  File? temp;
   try {
     await _ensureMediaStore();
     final dir = await getTemporaryDirectory();
-    final temp = File('${dir.path}/$name');
+    temp = File('${dir.path}/$name');
     await temp.writeAsBytes(bytes, flush: true);
     final info = await MediaStore().saveFile(
       tempFilePath: temp.path,
@@ -81,30 +108,119 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
       dirName: DirName.download,
       relativePath: FilePath.root,
     );
-    try {
-      await temp.delete();
-    } catch (_) {}
     if (info == null) {
-      kLastSaveError.value = '插件未返回保存结果';
-      return null;
+      pluginError = '插件未返回保存结果';
+    } else {
+      final uri = info.uri.toString();
+      if (uri.isEmpty) {
+        pluginError = '插件返回的地址为空';
+      } else {
+        // 只有插件明确说成功了才留作兜底（磁盘核实失败时用）
+        pluginItem = DownloadedItem(
+          name: info.name,
+          uri: uri,
+          bytes: bytes.length,
+          time: DateTime.now(),
+        );
+      }
     }
-    final uri = info.uri.toString();
-    if (uri.isEmpty) {
-      kLastSaveError.value = '返回地址为空';
-      return null;
-    }
-    final item = DownloadedItem(
-      name: info.name,
-      uri: uri,
-      bytes: bytes.length,
-      time: DateTime.now(),
-    );
-    await _record(item);
-    return item;
   } catch (error) {
-    kLastSaveError.value = '$error';
+    pluginError = '$error';
+  } finally {
+    if (temp != null) {
+      try {
+        if (temp.existsSync()) await temp.delete();
+      } catch (_) {}
+    }
+  }
+
+  // 首选：磁盘核实（拿到的是真实路径）
+  final landed = await _confirmLanded(name, bytes.length, started);
+  final item = landed != null
+      ? DownloadedItem(
+          name: landed.name,
+          uri: landed.path,
+          bytes: landed.bytes,
+          time: DateTime.now(),
+        )
+      : pluginItem;
+  if (item == null) {
+    kLastSaveError.value =
+        pluginError == null ? '文件没有出现在「下载/$kDownloadFolder」里' : '写入失败：$pluginError';
     return null;
   }
+  await _record(item);
+  return item;
+}
+
+/// 去磁盘确认文件真的落地了。
+Future<_Landed?> _confirmLanded(String name, int expectedBytes, DateTime since) async {
+  for (final dir in _candidateDirs()) {
+    try {
+      final file = File('$dir/$name');
+      if (!file.existsSync()) continue;
+      final length = file.lengthSync();
+      if (length == expectedBytes) return _Landed(file.path, name, length);
+    } catch (_) {}
+  }
+  // 插件可能改名（`x (1).pdf`）：按「大小相同 + 刚写进来」找最新的一个
+  final floor = since.subtract(const Duration(seconds: 2));
+  for (final dir in _candidateDirs()) {
+    try {
+      final folder = Directory(dir);
+      if (!folder.existsSync()) continue;
+      _Landed? best;
+      DateTime? bestTime;
+      for (final entry in folder.listSync(followLinks: false)) {
+        if (entry is! File) continue;
+        try {
+          final stat = entry.statSync();
+          if (stat.size != expectedBytes) continue;
+          if (stat.modified.isBefore(floor)) continue;
+          if (bestTime != null && !stat.modified.isAfter(bestTime)) continue;
+          bestTime = stat.modified;
+          best = _Landed(entry.path, _nameOfPath(entry.path), stat.size);
+        } catch (_) {}
+      }
+      if (best != null) return best;
+    } catch (_) {}
+  }
+  return null;
+}
+
+String _nameOfPath(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  return index < 0 ? normalized : normalized.substring(index + 1);
+}
+
+/// 扫描「下载/DSH R」里的真实文件（索引为空/丢失时的兜底）。
+/// 目录枚举被系统拒绝时返回空列表，不抛异常。
+Future<List<DownloadedItem>> scanDownloadFolder() async {
+  final seen = <String>{};
+  final items = <DownloadedItem>[];
+  for (final dir in _candidateDirs()) {
+    try {
+      final folder = Directory(dir);
+      if (!folder.existsSync()) continue;
+      for (final entry in folder.listSync(followLinks: false)) {
+        if (entry is! File) continue;
+        final name = _nameOfPath(entry.path);
+        if (name.startsWith('.') || !seen.add(name)) continue;
+        try {
+          final stat = entry.statSync();
+          items.add(DownloadedItem(
+            name: name,
+            uri: entry.path,
+            bytes: stat.size,
+            time: stat.modified,
+          ));
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  items.sort((a, b) => b.time.compareTo(a.time));
+  return items;
 }
 
 Future<List<DownloadedItem>> loadDownloadIndex() async {
@@ -147,10 +263,23 @@ Future<void> removeDownloadRecord(DownloadedItem item) async {
       relativePath: kDownloadFolder,
     );
   } catch (_) {}
+  // 扫描出来的记录带真实路径，再按路径删一次，避免插件删除失败留下孤儿文件
+  if (item.uri.startsWith('/')) {
+    try {
+      final file = File(item.uri);
+      if (file.existsSync()) await file.delete();
+    } catch (_) {}
+  }
 }
 
 Future<String> openDownloaded(DownloadedItem item) async {
-  final result = await OpenFilex.open(item.uri.startsWith('content://') ? item.uri : item.name);
+  final uri = item.uri;
+  // 索引里可能是 content://、绝对路径，也可能只有文件名
+  final target =
+      uri.startsWith('content://') || uri.startsWith('file://') || uri.startsWith('/')
+          ? uri
+          : item.name;
+  final result = await OpenFilex.open(target);
   return result.message;
 }
 
@@ -189,7 +318,18 @@ class _DownloadsPageState extends State<DownloadsPage> {
   }
 
   Future<void> _load() async {
-    final items = await loadDownloadIndex();
+    // 索引 ∪ 目录扫描：索引可能因为历史 bug 是空的，直接看文件夹最靠谱。
+    final indexed = await loadDownloadIndex();
+    final scanned = await scanDownloadFolder();
+    final merged = <String, DownloadedItem>{};
+    for (final item in indexed) {
+      merged[item.name] = item;
+    }
+    for (final item in scanned) {
+      // 扫描结果带真实路径，优先用它
+      merged[item.name] = item;
+    }
+    final items = merged.values.toList()..sort((a, b) => b.time.compareTo(a.time));
     if (!mounted) return;
     setState(() {
       _items = items;
