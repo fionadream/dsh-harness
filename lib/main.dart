@@ -19,7 +19,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.3.6';
+const String kAppVersion = '0.3.7';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -1170,7 +1170,7 @@ class _ChatViewState extends State<ChatView> {
       );
       if (!mounted) return;
       final older = page.events.where((e) => e.seq < _oldestSeq).toList(growable: false);
-      setState(() {
+      _apply(() {
         _loadingOlder = false;
         _hasMore = page.hasMore;
         if (older.isNotEmpty) {
@@ -1178,7 +1178,6 @@ class _ChatViewState extends State<ChatView> {
           _rebuild();
         }
       });
-      // 反向列表里，旧内容追加在末尾（视觉顶部），不需要任何滚动补偿。
     } catch (_) {
       if (mounted) setState(() => _loadingOlder = false);
     }
@@ -1222,7 +1221,7 @@ class _ChatViewState extends State<ChatView> {
         turnWindow: const TurnWindow(120, 12),
       );
       if (!mounted) return;
-      setState(() {
+      _apply(() {
         // 合并去重，而不是整体替换：
         // 否则服务端快照滞后会把刚发出的消息抹掉，且之后的事件被 seq 过滤丢弃。
         final merged = <int, SessionLogEvent>{
@@ -1264,7 +1263,7 @@ class _ChatViewState extends State<ChatView> {
         .listen((event) {
         if (event is SessionLogEvent) {
           if (event.seq <= _lastSeq) return;
-          setState(() {
+          _apply(() {
             _events.add(event);
             _ingest(event);
             _lastSeq = event.seq;
@@ -1274,13 +1273,13 @@ class _ChatViewState extends State<ChatView> {
         if (event is AssistantChunkEvent) {
           final chunk = event.chunk;
           if (chunk is TextDeltaChunk && _turns.isNotEmpty) {
-            setState(() => _turns.last.live += chunk.text);
+            _apply(() => _turns.last.live += chunk.text);
           }
           return;
         }
         if (event is AssistantStreamEnded) {
           if (!event.committed) {
-            setState(() {
+            _apply(() {
               if (_turns.isNotEmpty) _turns.last.live = '';
             });
           }
@@ -1449,6 +1448,27 @@ class _ChatViewState extends State<ChatView> {
       if (!_scroll.hasClients) return;
       // reverse:true → offset 0 就是视觉底部
       _scroll.jumpTo(0);
+    });
+  }
+
+  /// 执行一次会改变列表高度的状态更新，并保持用户当前看到的内容不位移。
+  ///
+  /// reverse 列表里 offset 是"距底部的距离"：底部内容高度变化后，
+  /// 用户正在看的内容距底部也变了，必须把差值补回去，否则画面会"滑"走。
+  /// 只有用户不在底部（offset > 0）时才补偿；在底部就保持跟随。
+  void _apply(VoidCallback mutate) {
+    final hadClients = _scroll.hasClients;
+    final beforeOffset = hadClients ? _scroll.offset : 0.0;
+    final beforeMax = hadClients ? _scroll.position.maxScrollExtent : 0.0;
+    setState(mutate);
+    if (!hadClients || beforeOffset <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final afterMax = _scroll.position.maxScrollExtent;
+      final delta = afterMax - beforeMax;
+      if (delta.abs() < 0.5) return;
+      final target = (beforeOffset + delta).clamp(0.0, afterMax);
+      if ((_scroll.offset - target).abs() > 0.5) _scroll.jumpTo(target);
     });
   }
 
