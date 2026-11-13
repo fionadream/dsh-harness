@@ -18,7 +18,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.5';
+const String kAppVersion = '0.4.6';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -84,9 +84,6 @@ final ValueNotifier<double> kFontScale = ValueNotifier<double>(1.0);
 
 /// 当前连接的电脑名（保活通知里显示）。
 final ValueNotifier<String?> kLastDevice = ValueNotifier<String?>(null);
-
-/// 最近一次发送的耗时（设置页显示，用于判断"消息慢"是网络还是渲染）。
-final ValueNotifier<String> kLastSendStats = ValueNotifier<String>('');
 
 class DshMiniApp extends StatefulWidget {
   const DshMiniApp({super.key});
@@ -1084,6 +1081,44 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// 抽屉底部「设置」右侧的「＋ 新会话」。
+  Widget _newSessionPill() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _startNewSessionFromDrawer,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: T.chipBg,
+          borderRadius: BorderRadius.circular(T.rChip),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.add_rounded, size: 16, color: T.brand),
+            const SizedBox(width: 3),
+            Text(
+              '新会话',
+              style: TextStyle(
+                fontSize: 13,
+                color: T.brand,
+                fontWeight: weightOf(kWeight.value),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 从抽屉里新建会话：先把抽屉关掉，否则工作区弹窗会被抽屉挡住。
+  Future<void> _startNewSessionFromDrawer() async {
+    Navigator.of(context).pop();
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
+    await _startNewSession();
+  }
+
   Widget _drawer() {
     final ungrouped = _ungrouped;
     return Drawer(
@@ -1142,6 +1177,8 @@ class _HomePageState extends State<HomePage> {
             TRow(
               icon: Icons.settings_outlined,
               label: '设置',
+              showChevron: false,
+              trailing: _newSessionPill(),
               onTap: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
               ),
@@ -1158,13 +1195,8 @@ class _HomePageState extends State<HomePage> {
     return GestureDetector(
       onHorizontalDragEnd: (details) {
         final v = details.primaryVelocity ?? 0;
-        if (v > 250) {
-          // 右滑：打开会话抽屉
-          _scaffoldKey.currentState?.openDrawer();
-        } else if (v < -250) {
-          // 左滑：新建会话（先选工作区）
-          _startNewSession();
-        }
+        // 只保留右滑开抽屉；左滑不再触发新建会话（用户 2026-11-13 要求取消）。
+        if (v > 250) _scaffoldKey.currentState?.openDrawer();
       },
       child: Scaffold(
         key: _scaffoldKey,
@@ -1750,7 +1782,6 @@ class _ChatViewState extends State<ChatView> {
       for (final msg in turn.users) {
         if (!msg.echoPending || !matches(msg.text)) continue;
         msg.echoPending = false;
-        kLastSendStats.value = '${kLastSendStats.value} · 回显已到';
         return true;
       }
     }
@@ -1858,8 +1889,6 @@ class _ChatViewState extends State<ChatView> {
           if (images.isNotEmpty) _pendingImages.clear();
         });
       }
-      kLastSendStats.value =
-          '发出耗时 ${DateTime.now().difference(started).inMilliseconds}ms';
     } catch (error) {
       if (!mounted) return;
       setState(() {

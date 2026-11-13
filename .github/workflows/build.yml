@@ -43,6 +43,7 @@ jobs:
               'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
               'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
               'android.permission.WRITE_EXTERNAL_STORAGE',
+              'android.permission.MANAGE_EXTERNAL_STORAGE',
               'android.permission.ACCESS_NETWORK_STATE',
               'android.permission.CHANGE_NETWORK_STATE',
           ]

@@ -22,9 +22,14 @@ const List<String> _downloadRoots = <String>[
   '/sdcard/Download',
 ];
 
+/// 目标子目录（只用于直写，不包含 Download 根目录）。
+List<String> _targetDirs() => <String>[
+      for (final root in _downloadRoots) '$root/$kDownloadFolder',
+    ];
+
 /// 候选目录：先 `下载/DSH R`，再 `下载` 本身（插件万一没建子目录）。
 List<String> _candidateDirs() => <String>[
-      for (final root in _downloadRoots) '$root/$kDownloadFolder',
+      ..._targetDirs(),
       for (final root in _downloadRoots) root,
     ];
 
@@ -87,15 +92,31 @@ Future<void> _ensureMediaStore() async {
 
 /// 不弹框直接写入「下载/DSH R」。
 ///
-/// **不再相信 `MediaStore().saveFile()` 的返回值**：实测它经常写完文件后
-/// 抛异常或返回 null，导致上层误判失败、又弹一次系统保存框、索引也写不进去。
-/// 现在以磁盘为准——文件真的在、字节数对，就算成功。
+/// 顺序：
+/// 1) **直写** `Download/DSH R/<name>`（需要「所有文件访问」权限，给了就必定成功、
+///    目录也一定对）——只有它能保证文件落在 DSH R 子目录里；
+/// 2) 直写失败（没授权）→ 回退 `MediaStore`，实测它只认 `Download` 根目录，
+///    `appFolder` 不生效；此时仍然保存，但位置不对，由调用方提示用户去授权。
 Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
   kLastSaveError.value = null;
   final started = DateTime.now();
+
+  // 1) 直写子目录
+  final direct = await _writeDirect(name, bytes);
+  if (direct != null) {
+    final item = DownloadedItem(
+      name: direct.name,
+      uri: direct.path,
+      bytes: direct.bytes,
+      time: DateTime.now(),
+    );
+    await _record(item);
+    return item;
+  }
+
+  // 2) 回退 MediaStore（会落到 Download 根目录）
   String? pluginError;
   DownloadedItem? pluginItem;
-
   File? temp;
   try {
     await _ensureMediaStore();
@@ -115,7 +136,6 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
       if (uri.isEmpty) {
         pluginError = '插件返回的地址为空';
       } else {
-        // 只有插件明确说成功了才留作兜底（磁盘核实失败时用）
         pluginItem = DownloadedItem(
           name: info.name,
           uri: uri,
@@ -134,7 +154,6 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
     }
   }
 
-  // 首选：磁盘核实（拿到的是真实路径）
   final landed = await _confirmLanded(name, bytes.length, started);
   final item = landed != null
       ? DownloadedItem(
@@ -145,12 +164,32 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
         )
       : pluginItem;
   if (item == null) {
-    kLastSaveError.value =
-        pluginError == null ? '文件没有出现在「下载/$kDownloadFolder」里' : '写入失败：$pluginError';
+    kLastSaveError.value = pluginError == null
+        ? '写入失败：没有「所有文件访问」权限，也读不到「下载/$kDownloadFolder」'
+        : '写入失败：$pluginError';
     return null;
   }
   await _record(item);
   return item;
+}
+
+/// 直接写 `Download/DSH R/<name>`。没有权限时抛异常 → 返回 null。
+Future<_Landed?> _writeDirect(String name, Uint8List bytes) async {
+  for (final dir in _targetDirs()) {
+    try {
+      final folder = Directory(dir);
+      if (!folder.existsSync()) folder.createSync(recursive: true);
+      final file = File('$dir/$name');
+      await file.writeAsBytes(bytes, flush: true);
+      final length = file.lengthSync();
+      if (length == bytes.length) {
+        return _Landed(file.path, name, length);
+      }
+    } catch (_) {
+      // 换下一个根目录试
+    }
+  }
+  return null;
 }
 
 /// 去磁盘确认文件真的落地了。

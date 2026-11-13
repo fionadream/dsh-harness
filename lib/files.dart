@@ -204,7 +204,11 @@ Future<String?> downloadWorkspaceFile(
   final name = sanitizeFileName(fileName);
   final saved = await saveToDownloads(name, bytes);
   if (saved == null) return null;
-  return '内部存储/$kDownloadFolder/${saved.name}';
+  // 直写成功 → 在 DSH R 子目录；回退 MediaStore → 落在 Download 根目录
+  if (saved.uri.contains('/$kDownloadFolder/')) {
+    return '内部存储/$kDownloadFolder/${saved.name}';
+  }
+  return '内部存储/Download/${saved.name}（未授权「所有文件访问」，没能进 $kDownloadFolder）';
 }
 
 String sanitizeFileName(String name) {
