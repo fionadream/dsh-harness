@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
+import 'downloads.dart';
 import 'files.dart';
 import 'theme.dart';
 
@@ -31,15 +32,31 @@ class _FileCandidate {
 }
 
 class _FileStripState extends State<FileStrip> {
+  /// 扫描结果缓存：key = 会话 + 正文。
+  /// 列表重建时 widget 会被替换成同一个正文的新实例，没有缓存就会重新扫描、
+  /// 卡片先消失再出现，高度一变整屏就跳。
+  static final Map<String, List<_FileCandidate>> _cache = <String, List<_FileCandidate>>{};
+
   final List<_FileCandidate> _files = [];
   bool _checked = false;
   String? _busy;
   double? _progress;
 
+  String get _cacheKey => '${widget.sessionId}\u0000${widget.text}';
+
   @override
   void initState() {
     super.initState();
-    _scan();
+    final cached = _cache[_cacheKey];
+    if (cached != null) {
+      // 命中缓存：首帧就有确定高度，不会跳
+      _files
+        ..clear()
+        ..addAll(cached);
+      _checked = true;
+    } else {
+      _scan();
+    }
   }
 
   static final RegExp _windowsAbs =
@@ -92,6 +109,8 @@ class _FileStripState extends State<FileStrip> {
     }
 
     if (!mounted) return;
+    if (_cache.length > 300) _cache.clear();
+    _cache[_cacheKey] = found;
     setState(() {
       _files
         ..clear()
@@ -128,8 +147,15 @@ class _FileStripState extends State<FileStrip> {
         },
       );
       if (!mounted) return;
+      final reason = kLastSaveError.value;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(saved == null ? '已取消' : '已保存：$saved')),
+        SnackBar(
+          content: Text(
+            saved == null
+                ? (reason == null ? '保存失败' : '保存失败：$reason')
+                : '已保存到 $saved',
+          ),
+        ),
       );
     } catch (error) {
       if (!mounted) return;
