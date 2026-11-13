@@ -60,6 +60,7 @@ var _mediaStoreReady = false;
 Future<void> _ensureMediaStore() async {
   if (_mediaStoreReady) return;
   MediaStore.appFolder = _kInternalRoot;
+  await MediaStore.ensureInitialized();
   _mediaStoreReady = true;
 }
 
@@ -73,7 +74,7 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
     final info = await MediaStore().saveFile(
       tempFilePath: temp.path,
       dirType: DirType.download,
-      dirsType: DirsType.normal,
+      dirName: DirName.download,
       relativePath: kDownloadFolder,
     );
     try {
@@ -82,7 +83,7 @@ Future<DownloadedItem?> saveToDownloads(String name, Uint8List bytes) async {
     final uri = info.uri.toString();
     if (uri.isEmpty) return null;
     final item = DownloadedItem(
-      name: info.title ?? name,
+      name: info.name,
       uri: uri,
       bytes: bytes.length,
       time: DateTime.now(),
@@ -127,10 +128,12 @@ Future<void> removeDownloadRecord(DownloadedItem item) async {
   await _saveIndex(items);
   try {
     await _ensureMediaStore();
-    final store = MediaStore();
-    if (item.uri.startsWith('content://')) {
-      await store.deleteFile(item.uri);
-    }
+    await MediaStore().deleteFile(
+      fileName: item.name,
+      dirType: DirType.download,
+      dirName: DirName.download,
+      relativePath: kDownloadFolder,
+    );
   } catch (_) {}
 }
 
