@@ -96,11 +96,16 @@ class DownloadCancelled implements Exception {
   String toString() => '已取消';
 }
 
+/// 流水线并发数：同时最多这么多个 `readBytes` 在途。
+/// 串行时每个块都要等一次往返，改成预取后总耗时接近"最慢的一块 × 块数 / 并发"。
+const int kReadPipeline = 3;
+
 /// 从 Host 的工作区分块读取一个文件，边读边喂给 [onChunk]。
 /// 返回字节数。通过 [isCancelled] 可以中途取消。
 ///
-/// 块大小自适应：默认试 [kReadWindowBytesFast]，失败（帧过大/超时）就降到
-/// [kReadWindowBytesSafe] 重试同一段，之后整个文件都用小块，不会中断。
+/// **流水线预取**：同时保持最多 [kReadPipeline] 个分块请求在途，
+/// 按 offset 顺序交付给 [onChunk]，所以拼接顺序一定是正确的。
+/// 某块失败会退回串行重试该段（不中断整个下载）。
 Future<int> readWorkspaceFile(
   DshClient client,
   String sessionId,
@@ -109,33 +114,25 @@ Future<int> readWorkspaceFile(
   void Function(DownloadProgress)? onProgress,
   bool Function()? isCancelled,
 }) async {
-  var offset = 0;
-  String? expectedVersion;
-  int? total;
   var window = kReadWindowBytesFast;
   var downgraded = false;
+  String? expectedVersion;
+  int? total;
 
-  while (true) {
-    if (isCancelled?.call() ?? false) throw const DownloadCancelled();
+  // 已发出但还没交付的块，按 offset 升序（Map 保持插入序）
+  final pending = <int, Future<(int, Uint8List)>>{};
+  var nextOffset = 0; // 下一个要请求的起点
+  var delivered = 0; // 已经交付给 onChunk 的字节数
+  var eof = false;
 
-    Object? value;
-    try {
-      value = await client.rpc.call('workspaceFiles/readBytes', {
-        'workspaceFileScopeId': sessionId,
-        'path': path,
-        'options': {
-          'range': {'offset': offset, 'length': window},
-        },
-      });
-    } catch (error) {
-      // 首次用大块失败：退回小块重试同一段，绝不中断下载。
-      if (!downgraded && window > kReadWindowBytesSafe) {
-        downgraded = true;
-        window = kReadWindowBytesSafe;
-        continue;
-      }
-      rethrow;
-    }
+  Future<(int, Uint8List)> fetch(int offset, int length) async {
+    final value = await client.rpc.call('workspaceFiles/readBytes', {
+      'workspaceFileScopeId': sessionId,
+      'path': path,
+      'options': {
+        'range': {'offset': offset, 'length': length},
+      },
+    });
     if (value is! Map) throw Exception('读取失败：返回格式异常');
 
     final version = value['version'];
@@ -145,17 +142,74 @@ Future<int> readWorkspaceFile(
       }
       expectedVersion = version;
     }
-
     final data = _bytesOf(value['data']);
-    offset += data.length;
-    if (offset > kMaxDownloadBytes) throw Exception('文件超过 100 MiB，无法下载');
-
-    if (data.isNotEmpty) await onChunk(data);
     final reported = value['bytes'];
     if (reported is int) total = reported;
-    onProgress?.call(DownloadProgress(offset, total));
+    if (value['eof'] == true || data.isEmpty) eof = true;
+    return (offset, data);
+  }
 
-    if (value['eof'] == true || data.isEmpty) return offset;
+  /// 把流水线填满；已知总大小时不越过末尾。
+  void fill() {
+    while (!eof && pending.length < kReadPipeline) {
+      final size = total;
+      if (size != null && nextOffset >= size) break;
+      final start = nextOffset;
+      pending[start] = fetch(start, window);
+      nextOffset += window;
+    }
+  }
+
+  /// 丢弃在途请求：挂上空处理，避免变成未捕获的异步错误。
+  void discardPending() {
+    for (final future in pending.values) {
+      future.then((_) {}, onError: (_) {});
+    }
+    pending.clear();
+  }
+
+  try {
+    fill();
+    while (pending.isNotEmpty) {
+      if (isCancelled?.call() ?? false) throw const DownloadCancelled();
+
+      final firstOffset = pending.keys.first;
+      final future = pending.remove(firstOffset)!;
+      (int, Uint8List) result;
+      try {
+        result = await future;
+      } catch (error) {
+        // 首次用大块失败：降到小块、丢弃在途请求、从该段重来
+        if (!downgraded && window > kReadWindowBytesSafe) {
+          downgraded = true;
+          window = kReadWindowBytesSafe;
+          discardPending();
+          eof = false;
+          nextOffset = delivered;
+          fill();
+          continue;
+        }
+        rethrow;
+      }
+
+      final (offset, data) = result;
+      // 越过 EOF 的空块：直接跳过（预取可能多请求了一段）
+      if (data.isEmpty) {
+        if (!eof) fill();
+        continue;
+      }
+      if (offset != delivered) throw Exception('分块顺序错乱（$offset ≠ $delivered）');
+      delivered += data.length;
+      if (delivered > kMaxDownloadBytes) throw Exception('文件超过 100 MiB，无法下载');
+      await onChunk(data);
+      onProgress?.call(DownloadProgress(delivered, total));
+
+      if (!eof) fill();
+    }
+    return delivered;
+  } catch (_) {
+    discardPending();
+    rethrow;
   }
 }
 

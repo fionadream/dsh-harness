@@ -19,7 +19,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.7';
+const String kAppVersion = '0.4.8';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -630,6 +630,41 @@ class _MonitorPainter extends CustomPainter {
       oldDelegate.screenH != screenH;
 }
 
+/// 上下文占用的小圆环：底环浅灰 + 进度弧。
+class _RingPainter extends CustomPainter {
+  const _RingPainter({required this.ratio, required this.color});
+
+  final double ratio;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const stroke = 2.0;
+    final rect = Rect.fromCircle(
+      center: Offset(size.width / 2, size.height / 2),
+      radius: (size.width - stroke) / 2,
+    );
+    final base = Paint()
+      ..color = const Color(0xFFE6E6EA)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..isAntiAlias = true;
+    canvas.drawCircle(rect.center, rect.width / 2, base);
+
+    final arc = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+    canvas.drawArc(rect, -1.5708, 6.28318 * ratio, false, arc);
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter oldDelegate) =>
+      oldDelegate.ratio != ratio || oldDelegate.color != color;
+}
+
 /* ------------------------------------------------------------------ 主页 */
 
 class HomePage extends StatefulWidget {
@@ -647,8 +682,13 @@ class _HomePageState extends State<HomePage> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
 
-  /// 未经过滤的全量会话（含空会话），只用于按 id 查找。
-  List<SessionSummary> _allSessions = const [];
+  /// 已归档的会话 id。**只增不减**，每次拿到 baseline 做并集：
+  /// 首帧快照不完整时也不会让归档会话"复活"。
+  Set<String> _archived = <String>{};
+
+  /// 刚创建、还没出现在正式列表里的会话（用于建完立刻进入）。
+  /// 一旦它出现在 `_sessions` 里就自动清掉。
+  final Map<String, SessionSummary> _freshlyCreated = <String, SessionSummary>{};
   List<Workspace> _workspaces = const [];
   Set<String> _collapsed = {};
   final Map<String, DateTime> _readAt = {};
@@ -657,10 +697,14 @@ class _HomePageState extends State<HomePage> {
   bool _loading = true;
   String? _error;
 
+  /// 「新建会话」用的本地占位（见 `_freshlyCreated`）。
+  StreamSubscription<WorkspaceUpdate>? _wsSub;
+
   @override
   void initState() {
     super.initState();
     _loadSessions();
+    _watchWorkspaces();
     _loadDrawerState();
     _loadReadState();
     kLastDevice.value = widget.host.name;
@@ -672,6 +716,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     kResumeTick.removeListener(_onResume);
+    _wsSub?.cancel();
     super.dispose();
   }
 
@@ -726,6 +771,63 @@ class _HomePageState extends State<HomePage> {
     return session.updatedAt.isAfter(read);
   }
 
+  /// 未过滤的原始会话行；只用于重新计算可见列表，绝不直接展示或查找。
+  List<SessionSummary> _rawSessions = const [];
+
+  /// 按「无父会话 + 非空 + 未归档」重算可见列表。
+  void _refreshVisible() {
+    _sessions = _rawSessions
+        .where((s) => s.parentSessionId == null)
+        .where((s) => s.blank != true)
+        .where((s) => !_archived.contains(s.sessionId))
+        .toList();
+  }
+
+  /// 订阅工作区更新：归档集合以服务端为准（`archived` 帧是完整集合）。
+  void _watchWorkspaces() {
+    try {
+      _wsSub = widget.client.watchWorkspaces().listen(
+        (update) {
+          if (!mounted) return;
+          if (update is WorkspaceBaseline) {
+            // 首帧可能是空的：只做并集，避免把已归档的放出来
+            _archived = <String>{..._archived, ...update.archivedSessionIds};
+            setState(() {
+              _workspaces = update.workspaces;
+              _refreshVisible();
+            });
+            return;
+          }
+          if (update is WorkspaceArchivedUpdate) {
+            // 服务端明确下发完整集合 → 以它为准（支持在电脑端恢复）
+            _archived = update.archivedSessionIds.toSet();
+            setState(_refreshVisible);
+            return;
+          }
+          if (update is WorkspaceUpsert) {
+            final list = [..._workspaces];
+            final index = list.indexWhere((w) => w.workspaceId == update.workspace.workspaceId);
+            if (index >= 0) {
+              list[index] = update.workspace;
+            } else {
+              list.add(update.workspace);
+            }
+            setState(() => _workspaces = list);
+            return;
+          }
+          if (update is WorkspaceRemoved) {
+            setState(() {
+              _workspaces =
+                  _workspaces.where((w) => w.workspaceId != update.workspaceId).toList();
+            });
+          }
+        },
+        onError: (_) {},
+        cancelOnError: false,
+      );
+    } catch (_) {}
+  }
+
   Future<void> _loadSessions() async {
     try {
       final sessions = await widget.client.listSessions();
@@ -736,15 +838,15 @@ class _HomePageState extends State<HomePage> {
         baseline = null;
       }
       if (!mounted) return;
-      final archived = (baseline?.archivedSessionIds ?? const <String>[]).toSet();
+      // 归档 id 只增不减：即使这一帧 baseline 缺字段，也不会让已归档的复活。
+      final incoming = (baseline?.archivedSessionIds ?? const <String>[]);
+      _archived = <String>{..._archived, ...incoming};
+      _rawSessions = sessions;
       setState(() {
-        _allSessions = sessions;
-        _sessions = sessions
-            .where((s) => s.parentSessionId == null)
-            .where((s) => s.blank != true)
-            .where((s) => !archived.contains(s.sessionId))
-            .toList();
-        _workspaces = baseline?.workspaces ?? const [];
+        _refreshVisible();
+        // 已进入正式列表的"新建会话"不必再单独留着
+        _freshlyCreated.removeWhere((id, _) => _sessions.any((s) => s.sessionId == id));
+        _workspaces = baseline?.workspaces ?? _workspaces;
         _loading = false;
         _error = null;
       });
@@ -773,15 +875,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   SessionSummary? _find(String id) {
-    // 先查未过滤的全量列表：新建的空会话 blank == true，会被抽屉列表过滤掉，
-    // 只在 _sessions 里找会找不到 → 表现为"建好了却不进去，只提示下拉刷新"。
-    for (final s in _allSessions) {
-      if (s.sessionId == id) return s;
-    }
+    // 只查过滤后的正式列表（保证归档/空会话不会因为查找而复活）。
     for (final s in _sessions) {
       if (s.sessionId == id) return s;
     }
-    return null;
+    // 例外：刚创建、还没被列表收录的会话（blank 会话会被过滤）。
+    return _freshlyCreated[id];
   }
 
   Future<void> _rename(SessionSummary session) async {
@@ -821,8 +920,19 @@ class _HomePageState extends State<HomePage> {
     if (ok != true) return;
     try {
       await widget.client.archiveSession(session.sessionId);
-      if (_current?.sessionId == session.sessionId) setState(() => _current = null);
+      // 本地立刻生效（不等服务端投影刷新）：
+      _archived = <String>{..._archived, session.sessionId};
+      setState(() {
+        _refreshVisible();
+        if (_current?.sessionId == session.sessionId) _current = null;
+      });
       await _loadSessions();
+      // 校验：服务端若仍返回它，说明归档没真正生效，明确告诉用户
+      if (mounted && _sessions.any((s) => s.sessionId == session.sessionId)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('归档未在服务端生效，请稍后重试')),
+        );
+      }
     } catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('归档失败：$error')));
     }
@@ -951,13 +1061,27 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final created = await widget.client.createSession(workspaceId: choice.workspaceId);
+      // 立刻构造一个本地占位，保证"建完就能进"；正式列表收录后自动让位。
+      final now = DateTime.now();
+      _freshlyCreated[created.sessionId] = SessionSummary(
+        sessionId: created.sessionId,
+        updatedAt: now,
+        running: false,
+        blank: true,
+        agentAvailable: true,
+        cwd: choice.path.isEmpty ? null : choice.path,
+      );
       // 服务端投影可能滞后：重试几次把新会话拉进列表（最多约 3 秒）。
       SessionSummary? session;
       for (var attempt = 0; attempt < 6; attempt += 1) {
         await _loadSessions();
         if (!mounted) return;
         session = _find(created.sessionId);
-        if (session != null) break;
+        if (session != null) {
+          // 只在拿到"真"会话时才停（本地占位不算）
+          final real = _sessions.any((s) => s.sessionId == created.sessionId);
+          if (real) break;
+        }
         await Future<void>.delayed(const Duration(milliseconds: 500));
         if (!mounted) return;
       }
@@ -977,9 +1101,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   List<SessionSummary> _groupSessions(Workspace ws) {
+    // 只从过滤后的 _sessions 取：归档/空会话即使仍在 ws.sessionIds 里也不会冒出来。
+    final byId = {for (final s in _sessions) s.sessionId: s};
     final out = <SessionSummary>[];
     for (final id in ws.sessionIds) {
-      final s = _find(id);
+      final s = byId[id];
       if (s != null) out.add(s);
     }
     return out;
@@ -1421,6 +1547,27 @@ class _ChatViewState extends State<ChatView> {
         trimmed.contains('session continues');
   }
 
+  /// 上下文占用量（token），来自 `session/control` 的 `contextPressure` 投影。
+  /// `projectedTokens` 是"下一次请求大概会占多少"，`pressureTokens` 是上次实测值。
+  int? _ctxUsed;
+  int? _ctxWindow;
+  StreamSubscription<SessionControlUpdate>? _controlSub;
+
+  /// 从投影里读一次上下文压力（初始值和后续更新都走这里）。
+  void _readContextPressure(SessionProjections projections) {
+    final raw = projections.values['contextPressure'];
+    final map = raw is Map ? raw : null;
+    if (map == null) return;
+    int? asNum(Object? v) => v is num ? v.toInt() : null;
+    final used = asNum(map['projectedTokens']) ?? asNum(map['pressureTokens']);
+    final window = asNum(map['contextWindow']);
+    if (!mounted) return;
+    setState(() {
+      _ctxUsed = used;
+      _ctxWindow = window;
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1430,6 +1577,8 @@ class _ChatViewState extends State<ChatView> {
       _modelProvider = next.provider;
       _modelId = next.model;
     }
+    _readContextPressure(widget.session.projections);
+    _watchContextPressure();
     _load();
     kResumeTick.addListener(_onResumeSync);
     KeepAliveService.expired.addListener(_onKeepAliveExpired);
@@ -1440,6 +1589,39 @@ class _ChatViewState extends State<ChatView> {
   }
 
   /// 后台超过 1 小时：主动断开，切回来时由 resume 重新连接。
+  /// 订阅投影更新，实时刷新上下文百分比。
+  void _watchContextPressure() {
+    try {
+      _controlSub = widget.client.watchSessionControl().listen(
+        (update) {
+          if (!mounted) return;
+          if (update is SessionControlBaseline) {
+            final projections = update.projections[widget.session.sessionId];
+            if (projections != null) _readContextPressure(projections);
+            return;
+          }
+          if (update is SessionControlProjection) {
+            if (update.sessionId != widget.session.sessionId) return;
+            if (update.key != 'contextPressure') return;
+            final value = update.value;
+            if (value is! Map) return;
+            int? asNum(Object? v) => v is num ? v.toInt() : null;
+            final used = asNum(value['projectedTokens']) ?? asNum(value['pressureTokens']);
+            final window = asNum(value['contextWindow']);
+            setState(() {
+              _ctxUsed = used;
+              _ctxWindow = window;
+            });
+          }
+        },
+        onError: (_) {},
+        cancelOnError: false,
+      );
+    } catch (_) {
+      // 老版本 Host 可能没有这个通道：拿不到就不显示，不影响其它功能
+    }
+  }
+
   void _onKeepAliveExpired() {
     if (!mounted || !KeepAliveService.expired.value) return;
     _sub?.cancel();
@@ -2292,6 +2474,7 @@ class _ChatViewState extends State<ChatView> {
     KeepAliveService.expired.removeListener(_onKeepAliveExpired);
     _clock?.cancel();
     _clockTick.dispose();
+    _controlSub?.cancel();
     _retryTimer?.cancel();
     _sub?.cancel();
     _input.dispose();
@@ -2884,6 +3067,8 @@ class _ChatViewState extends State<ChatView> {
                 const SizedBox(width: 8),
                 _modelChip(),
                 const SizedBox(width: 8),
+                _contextChip(),
+                const SizedBox(width: 8),
                 _autoAllowButton(),
                 const Spacer(),
                 _primaryButton(),
@@ -2989,6 +3174,39 @@ class _ChatViewState extends State<ChatView> {
     final lower = value.toLowerCase();
     if (lower == 'deepseek' || lower == 'deep-seek') return 'DeepSeek';
     return value[0].toUpperCase() + value.substring(1);
+  }
+
+  /// 上下文百分比：小圆环 + 数字，夹在模型胶囊与自动审批之间。
+  /// 没有数据（Host 未上报）时整个不显示，避免占位。
+  Widget _contextChip() {
+    final used = _ctxUsed;
+    final window = _ctxWindow;
+    if (used == null || window == null || window <= 0) return const SizedBox.shrink();
+    final ratio = (used / window).clamp(0.0, 1.0);
+    final percent = (ratio * 100).round();
+    final Color color = percent >= 80
+        ? T.danger
+        : percent >= 50
+            ? T.warn
+            : T.textSecondary;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 18,
+            height: 18,
+            child: CustomPaint(painter: _RingPainter(ratio: ratio, color: color)),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            '$percent%',
+            style: TextStyle(fontSize: 11, height: 1.1, color: color),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _chip({IconData? icon, required String label, required VoidCallback onTap}) {
