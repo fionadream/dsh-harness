@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
 import 'deliverables.dart';
+import 'download_manager.dart';
 import 'filecard.dart';
 import 'files.dart';
 import 'images.dart';
@@ -19,7 +20,7 @@ import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.8';
+const String kAppVersion = '0.4.9';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -28,6 +29,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _restorePreferences();
   KeepAliveService.init();
+  // 正在下载时不因"后台满 1 小时"主动断连
+  KeepAliveService.busyGuard = () => DownloadManager.instance.hasActive;
   AppNotifications.init();
   runApp(const DshMiniApp());
 }
@@ -3176,35 +3179,38 @@ class _ChatViewState extends State<ChatView> {
     return value[0].toUpperCase() + value.substring(1);
   }
 
-  /// 上下文百分比：小圆环 + 数字，夹在模型胶囊与自动审批之间。
-  /// 没有数据（Host 未上报）时整个不显示，避免占位。
+  /// 上下文百分比：32×32 圆环（与 ⚡ 同尺寸），数字居中，品牌蓝。
+  /// 占用 ≥80% 转红预警；没有数据时整块不显示。
   Widget _contextChip() {
     final used = _ctxUsed;
     final window = _ctxWindow;
     if (used == null || window == null || window <= 0) return const SizedBox.shrink();
     final ratio = (used / window).clamp(0.0, 1.0);
     final percent = (ratio * 100).round();
-    final Color color = percent >= 80
-        ? T.danger
-        : percent >= 50
-            ? T.warn
-            : T.textSecondary;
+    final Color color = percent >= 80 ? T.danger : T.brand;
     return Padding(
       padding: const EdgeInsets.only(right: 8),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 18,
-            height: 18,
-            child: CustomPaint(painter: _RingPainter(ratio: ratio, color: color)),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            '$percent%',
-            style: TextStyle(fontSize: 11, height: 1.1, color: color),
-          ),
-        ],
+      child: SizedBox(
+        width: 32,
+        height: 32,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Positioned.fill(
+              child: CustomPaint(painter: _RingPainter(ratio: ratio, color: color)),
+            ),
+            Text(
+              '$percent%',
+              style: TextStyle(
+                fontSize: 9,
+                height: 1.0,
+                color: color,
+                fontWeight: weightOf(kWeight.value),
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

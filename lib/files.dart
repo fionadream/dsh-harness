@@ -96,9 +96,9 @@ class DownloadCancelled implements Exception {
   String toString() => '已取消';
 }
 
-/// 流水线并发数：同时最多这么多个 `readBytes` 在途。
-/// 串行时每个块都要等一次往返，改成预取后总耗时接近"最慢的一块 × 块数 / 并发"。
-const int kReadPipeline = 3;
+/// 流水线并发数。
+/// 实测并发并不提速，反而让通道拥塞、下载中断，因此**固定串行**（v0.2.68 起）。
+const int kReadPipeline = 1;
 
 /// 从 Host 的工作区分块读取一个文件，边读边喂给 [onChunk]。
 /// 返回字节数。通过 [isCancelled] 可以中途取消。
@@ -113,6 +113,8 @@ Future<int> readWorkspaceFile(
   required Future<void> Function(Uint8List chunk) onChunk,
   void Function(DownloadProgress)? onProgress,
   bool Function()? isCancelled,
+  /// 断点续传：从这个字节位置开始读（调用方已确认服务端 version 未变）。
+  int startOffset = 0,
 }) async {
   var window = kReadWindowBytesFast;
   var downgraded = false;
@@ -121,8 +123,8 @@ Future<int> readWorkspaceFile(
 
   // 已发出但还没交付的块，按 offset 升序（Map 保持插入序）
   final pending = <int, Future<(int, Uint8List)>>{};
-  var nextOffset = 0; // 下一个要请求的起点
-  var delivered = 0; // 已经交付给 onChunk 的字节数
+  var nextOffset = startOffset; // 下一个要请求的起点
+  var delivered = startOffset; // 已经交付给 onChunk 的字节数
   var eof = false;
 
   Future<(int, Uint8List)> fetch(int offset, int length) async {

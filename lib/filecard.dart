@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
-import 'downloads.dart';
+import 'download_manager.dart';
 import 'files.dart';
 import 'theme.dart';
 
@@ -39,8 +39,6 @@ class _FileStripState extends State<FileStrip> {
 
   final List<_FileCandidate> _files = [];
   bool _checked = false;
-  String? _busy;
-  double? _progress;
 
   String get _cacheKey => '${widget.sessionId}\u0000${widget.text}';
 
@@ -130,105 +128,110 @@ class _FileStripState extends State<FileStrip> {
     return p;
   }
 
-  Future<void> _download(_FileCandidate file) async {
-    if (_busy != null) return;
-    setState(() {
-      _busy = file.name;
-      _progress = null;
-    });
-    try {
-      final saved = await downloadWorkspaceFile(
-        widget.client,
-        widget.sessionId,
-        file.path,
-        fileName: file.name,
-        onProgress: (p) {
-          if (mounted) setState(() => _progress = p.fraction);
-        },
-      );
-      if (!mounted) return;
-      final reason = kLastSaveError.value;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            saved == null
-                ? (reason == null ? '保存失败' : '保存失败：$reason')
-                : '已保存到 $saved',
-          ),
-        ),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('下载失败：$error')));
-    } finally {
-      if (mounted) {
-        setState(() {
-          _busy = null;
-          _progress = null;
-        });
-      }
+  /// 点下载：交给全局管理器，进度不再存在本组件的 State 里，
+/// 所以滑动列表、切到别的 App 都不会中断（v0.2.68）。
+  void _download(_FileCandidate file) {
+    final key = DownloadManager.keyOf(widget.sessionId, file.path);
+    final existing = DownloadManager.instance.taskOf(key);
+    if (existing != null && existing.active) {
+      DownloadManager.instance.cancel(key);
+      return;
     }
+    DownloadManager.instance.start(
+      client: widget.client,
+      sessionId: widget.sessionId,
+      path: file.path,
+      fileName: file.name,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     if (_files.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 4, bottom: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (final file in _files)
-            Container(
-              margin: const EdgeInsets.only(top: 6),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF7F8FA),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: T.divider),
-              ),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(12),
-                onTap: _busy == null ? () => _download(file) : null,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.insert_drive_file_outlined, size: 20, color: T.brand),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              file.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 14, color: T.text),
-                            ),
-                            if (file.bytes != null) ...[
-                              const SizedBox(height: 2),
-                              Text(
-                                formatBytes(file.bytes!),
-                                style: const TextStyle(fontSize: 12, color: T.textSecondary),
-                              ),
-                            ],
-                          ],
-                        ),
+    return ValueListenableBuilder<int>(
+      valueListenable: DownloadManager.instance.revision,
+      builder: (context, _, __) => Padding(
+        padding: const EdgeInsets.only(top: 4, bottom: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final file in _files) _fileRow(file),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fileRow(_FileCandidate file) {
+    final task = DownloadManager.instance.taskOf(
+      DownloadManager.keyOf(widget.sessionId, file.path),
+    );
+    final active = task?.active ?? false;
+    final done = task?.status == DownloadStatus.done;
+    final failed = task?.status == DownloadStatus.failed;
+    final progress = active ? task?.fraction : null;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F8FA),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: T.divider),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: done ? null : () => _download(file),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              const Icon(Icons.insert_drive_file_outlined, size: 20, color: T.brand),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      file.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 14, color: T.text),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      active
+                          ? '正在下载… ${((progress ?? 0) * 100).round()}%（切走也会继续）'
+                          : failed
+                              ? '下载失败，点此重试'
+                              : done
+                                  ? '已保存'
+                                  : (file.bytes == null ? '点击下载' : formatBytes(file.bytes!)),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: failed ? T.danger : T.textSecondary,
                       ),
-                      if (_busy == file.name)
-                        SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, value: _progress),
-                        )
-                      else
-                        const Icon(Icons.download_rounded, size: 22, color: T.brand),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
-            ),
-        ],
+              if (done)
+                const Icon(Icons.check_circle_rounded, size: 20, color: Color(0xFF32C48D))
+              else if (active)
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    value: (progress == null || progress <= 0) ? null : progress,
+                  ),
+                )
+              else
+                const Icon(Icons.download_rounded, size: 22, color: T.brand),
+            ],
+          ),
+        ),
       ),
     );
   }

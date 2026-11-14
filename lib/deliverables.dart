@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:dsh_remote/dsh_remote.dart';
-import 'downloads.dart';
+import 'download_manager.dart';
 import 'files.dart';
 import 'theme.dart';
 
@@ -70,103 +70,73 @@ class DeliverableCard extends StatefulWidget {
 }
 
 class _DeliverableCardState extends State<DeliverableCard> {
-  /// 每个文件的状态：null=未下载，0~1=进度，-1=完成，-2=失败
-  final Map<int, double> _progress = {};
-  final Map<int, String> _savedPath = {};
-  final Set<int> _failed = {};
-
-  Future<void> _download(int index) async {
-    if (_progress.containsKey(index) && _progress[index]! >= 0 && _progress[index]! < 1) {
-      return;
-    }
+  /// 点下载：交给全局管理器，**不再自己持有进度**。
+  /// 这样滑动列表、切到别的 App 都不会中断（v0.2.68）。
+  void _download(int index) {
     final file = widget.files[index];
     final target = resolveDeliveredPath(file.path, widget.cwd);
-    setState(() {
-      _failed.remove(index);
-      _savedPath.remove(index);
-      _progress[index] = 0;
-    });
-    try {
-      final saved = await downloadWorkspaceFile(
-        widget.client,
-        widget.sessionId,
-        target,
-        fileName: _fileNameOf(target),
-        onProgress: (p) {
-          if (!mounted) return;
-          setState(() => _progress[index] = p.fraction ?? 0);
-        },
-      );
-      if (!mounted) return;
-      final reason = kLastSaveError.value;
-      setState(() {
-        if (saved == null) {
-          _progress.remove(index);
-        } else {
-          _progress[index] = -1;
-          _savedPath[index] = saved;
-        }
-      });
-      if (saved == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(reason == null ? '保存失败' : '保存失败：$reason'),
-            duration: const Duration(seconds: 5),
-          ),
-        );
-      }
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _progress.remove(index);
-        _failed.add(index);
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('下载失败：$error'), duration: const Duration(seconds: 4)),
-      );
+    final key = DownloadManager.keyOf(widget.sessionId, target);
+    final existing = DownloadManager.instance.taskOf(key);
+    if (existing != null && existing.active) {
+      DownloadManager.instance.cancel(key);
+      return;
     }
+    DownloadManager.instance.start(
+      client: widget.client,
+      sessionId: widget.sessionId,
+      path: target,
+      fileName: _fileNameOf(target),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     if (widget.files.isEmpty) return const SizedBox.shrink();
-    return Container(
-      margin: const EdgeInsets.only(top: 8, bottom: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF7F8FA),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: T.divider),
-      ),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.inventory_2_outlined, size: 18, color: T.text),
-              const SizedBox(width: 8),
-              Text(
-                '交付了 ${widget.files.length} 个文件',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: T.text),
-              ),
+    return ValueListenableBuilder<int>(
+      valueListenable: DownloadManager.instance.revision,
+      builder: (context, _, __) => Container(
+        margin: const EdgeInsets.only(top: 8, bottom: 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF7F8FA),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: T.divider),
+        ),
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.inventory_2_outlined, size: 18, color: T.text),
+                const SizedBox(width: 8),
+                Text(
+                  '交付了 ${widget.files.length} 个文件',
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: T.text),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            for (var i = 0; i < widget.files.length; i += 1) ...[
+              _row(i),
+              if (i != widget.files.length - 1) const SizedBox(height: 8),
             ],
-          ),
-          const SizedBox(height: 10),
-          for (var i = 0; i < widget.files.length; i += 1) ...[
-            _row(i),
-            if (i != widget.files.length - 1) const SizedBox(height: 8),
           ],
-        ],
+        ),
       ),
     );
   }
 
   Widget _row(int index) {
     final file = widget.files[index];
-    final name = _fileNameOf(resolveDeliveredPath(file.path, widget.cwd));
-    final progress = _progress[index];
-    final done = progress != null && progress < 0;
-    final failed = _failed.contains(index);
+    final target = resolveDeliveredPath(file.path, widget.cwd);
+    final name = _fileNameOf(target);
+    final task = DownloadManager.instance.taskOf(
+      DownloadManager.keyOf(widget.sessionId, target),
+    );
+    final active = task?.active ?? false;
+    final done = task?.status == DownloadStatus.done;
+    final failed = task?.status == DownloadStatus.failed;
+    final progress = active ? (task?.fraction ?? 0.0) : null;
 
     return InkWell(
       borderRadius: BorderRadius.circular(10),

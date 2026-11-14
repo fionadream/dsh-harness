@@ -34,6 +34,9 @@ class KeepAliveService {
   static bool _initialized = false;
   static bool _running = false;
 
+  /// 由 main 注入：返回 true 表示"现在有正在进行的下载，别断开"。
+  static bool Function()? busyGuard;
+
   /// 是否因为超过 1 小时被主动断开（供 UI 提示）。
   static final ValueNotifier<bool> expired = ValueNotifier<bool>(false);
 
@@ -88,11 +91,7 @@ class KeepAliveService {
   static Future<void> start({String? device}) async {
     init();
     expired.value = false;
-    _timer?.cancel();
-    _timer = Timer(kKeepAliveWindow, () async {
-      expired.value = true;
-      await stop();
-    });
+    _armTimer();
 
     if (_running) {
       try {
@@ -117,6 +116,21 @@ class KeepAliveService {
     } catch (_) {
       _running = false;
     }
+  }
+
+  /// 起一个 1 小时的计时；到点时若正在下载则续期，不打断任务。
+  static void _armTimer() {
+    _timer?.cancel();
+    _timer = Timer(kKeepAliveWindow, () async {
+      final busy = busyGuard?.call() ?? false;
+      if (busy) {
+        // 正在下载：再给一小时，且不标记过期
+        _armTimer();
+        return;
+      }
+      expired.value = true;
+      await stop();
+    });
   }
 
   /// 回到前台：撤销倒计时并停止服务。
