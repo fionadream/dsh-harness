@@ -14,11 +14,12 @@ import 'files.dart';
 import 'images.dart';
 import 'keepalive.dart';
 import 'markdown.dart';
+import 'notifications.dart';
 import 'settings.dart';
 import 'theme.dart';
 
 /// 应用版本（设置页显示，便于核对装的是不是最新包）。
-const String kAppVersion = '0.4.6';
+const String kAppVersion = '0.4.7';
 
 /// 从后台切回前台时递增，会话页据此触发一次重新同步。
 final ValueNotifier<int> kResumeTick = ValueNotifier<int>(0);
@@ -27,6 +28,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _restorePreferences();
   KeepAliveService.init();
+  AppNotifications.init();
   runApp(const DshMiniApp());
 }
 
@@ -111,9 +113,11 @@ class _DshMiniAppState extends State<DshMiniApp> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
+        AppNotifications.foreground.value = false;
         // 切到后台：启动前台服务保活，并开始 1 小时倒计时。
         KeepAliveService.start(device: _lastDevice);
       case AppLifecycleState.resumed:
+        AppNotifications.foreground.value = true;
         // 回到前台：撤销倒计时、停服务，并让会话重新同步。
         KeepAliveService.stop();
         kResumeTick.value += 1;
@@ -642,6 +646,9 @@ class _HomePageState extends State<HomePage> {
 
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   List<SessionSummary> _sessions = const [];
+
+  /// 未经过滤的全量会话（含空会话），只用于按 id 查找。
+  List<SessionSummary> _allSessions = const [];
   List<Workspace> _workspaces = const [];
   Set<String> _collapsed = {};
   final Map<String, DateTime> _readAt = {};
@@ -731,6 +738,7 @@ class _HomePageState extends State<HomePage> {
       if (!mounted) return;
       final archived = (baseline?.archivedSessionIds ?? const <String>[]).toSet();
       setState(() {
+        _allSessions = sessions;
         _sessions = sessions
             .where((s) => s.parentSessionId == null)
             .where((s) => s.blank != true)
@@ -765,6 +773,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   SessionSummary? _find(String id) {
+    // 先查未过滤的全量列表：新建的空会话 blank == true，会被抽屉列表过滤掉，
+    // 只在 _sessions 里找会找不到 → 表现为"建好了却不进去，只提示下拉刷新"。
+    for (final s in _allSessions) {
+      if (s.sessionId == id) return s;
+    }
     for (final s in _sessions) {
       if (s.sessionId == id) return s;
     }
@@ -938,14 +951,21 @@ class _HomePageState extends State<HomePage> {
 
     try {
       final created = await widget.client.createSession(workspaceId: choice.workspaceId);
-      await _loadSessions();
-      if (!mounted) return;
-      final session = _find(created.sessionId);
+      // 服务端投影可能滞后：重试几次把新会话拉进列表（最多约 3 秒）。
+      SessionSummary? session;
+      for (var attempt = 0; attempt < 6; attempt += 1) {
+        await _loadSessions();
+        if (!mounted) return;
+        session = _find(created.sessionId);
+        if (session != null) break;
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        if (!mounted) return;
+      }
       if (session != null) {
         _open(session);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('会话已创建，下拉刷新列表可见')),
+          const SnackBar(content: Text('会话已创建，但列表还没同步，稍等刷新一下')),
         );
       }
     } catch (error) {
@@ -1490,6 +1510,8 @@ class _ChatViewState extends State<ChatView> {
   /// 上拉加载更早的历史。
   Future<void> _loadOlder() async {
     if (_loadingOlder || !_hasMore || _oldestSeq <= 1) return;
+    // 双保险：只有列表真的在顶部附近才去加载（挡住任何来源的误触发）。
+    if (!_scroll.hasClients || _scroll.position.pixels > 160) return;
     setState(() => _loadingOlder = true);
     try {
       final page = await widget.client.history(
@@ -1500,6 +1522,11 @@ class _ChatViewState extends State<ChatView> {
         turnWindow: const TurnWindow(120, 12),
       );
       if (!mounted) return;
+      // 请求期间用户可能已经往下翻走了 → 不要再插到上方打扰他
+      if (_scroll.hasClients && _scroll.position.pixels > 260) {
+        setState(() => _loadingOlder = false);
+        return;
+      }
       final older = page.events.where((e) => e.seq < _oldestSeq).toList(growable: false);
       _apply(() {
         _loadingOlder = false;
@@ -1508,7 +1535,7 @@ class _ChatViewState extends State<ChatView> {
           _events.insertAll(0, older);
           _rebuild();
         }
-      }, preserveTop: true);
+      }, preserveTop: true, settle: true);
     } catch (_) {
       if (mounted) setState(() => _loadingOlder = false);
     }
@@ -1760,6 +1787,15 @@ class _ChatViewState extends State<ChatView> {
         if (!_replaying && refresh != null) {
           Future<void>.delayed(const Duration(milliseconds: 900), refresh);
         }
+        // 任务完成提醒：只在 App 不在前台时弹系统通知。
+        if (!_replaying && !AppNotifications.foreground.value) {
+          final title = widget.session.projections.title ?? '对话';
+          final failed = turn.failed;
+          AppNotifications.taskDone(
+            title: failed ? '任务失败：$title' : '任务完成：$title',
+            body: failed ? '打开 DSH R 查看原因' : '打开 DSH R 查看结果',
+          );
+        }
         return;
       default:
         return;
@@ -1817,7 +1853,10 @@ class _ChatViewState extends State<ChatView> {
   ///
   /// [preserveTop] 用于"在最上面加载更早历史"：内容插到了视线**上方**，
   /// 需要把插入的高度补回滚动位置，否则会跳。
-  void _apply(VoidCallback mutate, {bool preserveTop = false}) {
+  ///
+  /// [settle] 再等一帧校验一次：图片、表格这类子项是异步测量高度的，
+  /// 第一帧的 delta 往往算小了，只补一次仍然会跳。
+  void _apply(VoidCallback mutate, {bool preserveTop = false, bool settle = false}) {
     final hadClients = _scroll.hasClients;
     final beforePixels = hadClients ? _scroll.position.pixels : 0.0;
     final beforeMax = hadClients ? _scroll.position.maxScrollExtent : 0.0;
@@ -1825,13 +1864,21 @@ class _ChatViewState extends State<ChatView> {
     // 只有"加载更早历史"需要补偿（内容插到了视线**上方**）。
     // 其他任何情况都不动画面：新内容长在下方，不会推动已有内容。
     if (!hadClients || !preserveTop) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+
+    void compensate() {
       if (!mounted || !_scroll.hasClients) return;
       final afterMax = _scroll.position.maxScrollExtent;
       final delta = afterMax - beforeMax;
       if (delta.abs() < 0.5) return;
       final target = (beforePixels + delta).clamp(0.0, afterMax);
       if ((_scroll.offset - target).abs() > 0.5) _scroll.jumpTo(target);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      compensate();
+      if (!settle) return;
+      // 第二帧再补一次，吃掉异步布局带来的高度差
+      WidgetsBinding.instance.addPostFrameCallback((_) => compensate());
     });
   }
 
@@ -2835,7 +2882,7 @@ class _ChatViewState extends State<ChatView> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                _chip(label: shortModelName(_modelLabel), onTap: _pickModel),
+                _modelChip(),
                 const SizedBox(width: 8),
                 _autoAllowButton(),
                 const Spacer(),
@@ -2902,6 +2949,48 @@ class _ChatViewState extends State<ChatView> {
     );
   }
 
+  /// 模型按钮：双层显示，按钮高度与原单行胶囊一致（约 30dp）。
+  /// 上层＝厂商名（DeepSeek），下层＝完整模型名。
+  Widget _modelChip() {
+    final provider = _providerLabel(_modelProvider);
+    final model = _modelLabel.trim().isEmpty ? '模型' : _modelLabel.trim();
+    return InkWell(
+      onTap: _pickModel,
+      borderRadius: BorderRadius.circular(T.rChip),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+        decoration: BoxDecoration(color: T.chipBg, borderRadius: BorderRadius.circular(T.rChip)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              provider,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 9, height: 1.15, color: T.brand),
+            ),
+            Text(
+              model,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, height: 1.2, color: T.brand),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// provider id → 展示名：deepseek → DeepSeek。
+  static String _providerLabel(String? raw) {
+    final value = (raw ?? '').trim();
+    if (value.isEmpty) return 'DeepSeek';
+    final lower = value.toLowerCase();
+    if (lower == 'deepseek' || lower == 'deep-seek') return 'DeepSeek';
+    return value[0].toUpperCase() + value.substring(1);
+  }
+
   Widget _chip({IconData? icon, required String label, required VoidCallback onTap}) {
     return InkWell(
       onTap: onTap,
@@ -2966,9 +3055,12 @@ class _ChatViewState extends State<ChatView> {
               : SelectionArea(
                   child: NotificationListener<ScrollNotification>(
                     onNotification: (notification) {
+                      // 只认最外层竖向列表。表格/代码块内部是横向滚动，
+                      // 它们的通知会一路冒泡到这里，若不挡掉会被误判成
+                      // "用户滑到顶部"，进而插入旧消息 + 补偿滚动位置 = 画面猛跳。
+                      if (notification.depth != 0) return false;
+                      if (notification.metrics.axis != Axis.vertical) return false;
                       // 只在"用户手指真的拖动"时才加载更早历史。
-                      // 以前只看 pixels<200，程序化 jumpTo / 计时重建都会触发，
-                      // 连锁加载并反复补偿位置 —— 就是"看着看着跳一下"的来源。
                       final dragged = notification is ScrollUpdateNotification &&
                           notification.dragDetails != null;
                       final pulledTop =

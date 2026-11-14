@@ -73,6 +73,29 @@ jobs:
               # flutter_webrtc 要求 minSdk >= 23
               s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
               s = s.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 23')
+
+              # flutter_local_notifications 17.x 要求 core library desugaring
+              if 'coreLibraryDesugaring' not in s:
+                  if name.endswith('.kts'):
+                      s = s.replace(
+                          'compileOptions {',
+                          'compileOptions {\n        isCoreLibraryDesugaringEnabled = true',
+                          1)
+                      if 'coreLibraryDesugaring(' not in s:
+                          s += ("\ndependencies {\n"
+                                "    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.1.4\")\n"
+                                "}\n")
+                  else:
+                      s = s.replace(
+                          'compileOptions {',
+                          'compileOptions {\n        coreLibraryDesugaringEnabled true',
+                          1)
+                      if "coreLibraryDesugaring '" not in s:
+                          s += ("\ndependencies {\n"
+                                "    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n"
+                                "}\n")
+                  print('patched desugar in', name)
+
               g.write_text(s, encoding='utf-8')
               print('patched compileSdk in', name)
           PY
